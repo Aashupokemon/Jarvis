@@ -1,0 +1,49 @@
+{
+  "skills": [
+    {
+      "name": "morning routine",
+      "triggers": ["good morning", "start my day", "morning routine"],
+      "actions": [
+        {"type": "speak", "text": "Good morning, sir! Starting your daily routine."},
+        {"type": "open", "app": "Chrome"},
+        {"type": "search", "query": "morning news today"}
+      ]
+    },
+    {
+      "name": "focus mode",
+      "triggers": ["focus mode", "start focus", "i need to focus", "deep work"],
+      "actions": [
+        {"type": "speak", "text": "Enabling focus mode. Minimizing distractions."},
+        {"type": "volume", "direction": "down"},
+        {"type": "speak", "text": "All set. Focus mode active."}
+      ]
+    },
+    {
+      "name": "goodnight",
+      "triggers": ["goodnight", "good night", "i'm going to sleep", "shutting down for the night"],
+      "actions": [
+        {"type": "speak", "text": "Goodnight, sir. Sleep well."},
+        {"type": "volume", "direction": "mute"}
+      ]
+    },
+    {
+      "name": "work setup",
+      "triggers": ["work mode", "start work", "set up for work"],
+      "actions": [
+        {"type": "speak", "text": "Setting up your workspace."},
+        {"type": "open", "app": "Slack"},
+        {"type": "open", "app": "Gmail"},
+        {"type": "speak", "text": "Workspace ready."}
+      ]
+    },
+    {
+      "name": "research mode",
+      "triggers": ["research mode", "help me research"],
+      "actions": [
+        {"type": "speak", "text": "Opening your research tools."},
+        {"type": "open", "app": "Chrome"},
+        {"type": "url", "url": "https://scholar.google.com"}
+      ]
+    }
+  ]
+}

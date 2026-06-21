@@ -1,0 +1,8 @@
+# Secret and temp files — never upload these
+_google_token.json
+memory.json
+__pycache__/
+*.pyc
+*.png
+.env
+plugins/_reminders.json

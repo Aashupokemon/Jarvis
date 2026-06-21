@@ -1,0 +1,40 @@
+# ─── Core requirements ───────────────────────────────────────────────────────
+requests>=2.31.0          # HTTP calls (Claude API, weather)
+psutil>=5.9.0             # CPU, RAM, battery info
+
+# ─── Voice Input (Whisper) ────────────────────────────────────────────────────
+openai-whisper>=20231117  # Speech-to-text (uses OpenAI Whisper locally, no API key needed)
+sounddevice>=0.4.6        # Microphone capture
+soundfile>=0.12.1         # Audio file handling
+numpy>=1.24.0             # Required by Whisper
+
+# ─── Voice Output ─────────────────────────────────────────────────────────────
+pyttsx3>=2.90             # Offline text-to-speech (works on Linux, macOS, Windows)
+# gTTS>=2.5.0             # Optional: Google TTS (requires internet)
+
+# ─── Screenshot support (also used by Phase 4 screen vision) ─────────────────
+pyautogui>=0.9.54         # Screenshots
+pillow>=10.0.0            # Required by pyautogui and tray icon
+
+# ─── Windows volume control (only needed on Windows) ──────────────────────────
+# pycaw>=20230407         # Windows audio control (uncomment on Windows)
+# comtypes>=1.2.0         # Required by pycaw (Windows only)
+
+# ─── Phase 3: Wake word (optional, accurate engine) ───────────────────────────
+# pvporcupine>=3.0.0      # Uncomment for accurate wake-word detection
+                          # (needs free access key from console.picovoice.ai)
+                          # Without this, Jarvis uses the built-in "simple"
+                          # Whisper-based wake word engine — no extra setup needed.
+
+# ─── Phase 4: System tray GUI ──────────────────────────────────────────────────
+pystray>=0.19.5           # System tray icon and menu
+
+# ─── Phase 4: Email & Calendar (Gmail + Google Calendar) ──────────────────────
+google-auth>=2.25.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.110.0
+
+# ─── Phase 4: Screen vision ─────────────────────────────────────────────────────
+# (uses pyautogui + pillow above — no extra packages needed)
+

@@ -1,0 +1,16 @@
+{
+  "wake_word": "hey jarvis",
+  "wake_word_engine": "simple",
+  "porcupine_access_key": "",
+  "voice_rate": 175,
+  "voice_volume": 0.9,
+  "whisper_model": "base",
+  "listen_duration": 6,
+  "memory_max_turns": 40,
+  "context_window": 20,
+  "personality": "You are Jarvis, a brilliant AI laptop assistant inspired by Iron Man. You are helpful, direct, and subtly witty. Keep responses concise (1-3 sentences) unless detail is explicitly needed. Address the user as 'sir' occasionally.",
+  "gui_enabled": true,
+  "vision_enabled": true,
+  "email_enabled": false,
+  "calendar_enabled": false
+}
