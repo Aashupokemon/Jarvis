@@ -346,11 +346,10 @@ class WakeWordDetector:
 
     def _run_simple(self):
         """
-        Simple engine: record 3-second chunks, transcribe with Whisper,
-        check for wake phrase. Low CPU usage between chunks.
+        Always-on wake word listener. Records 2-second chunks, transcribes
+        with Whisper, fires callback when 'hey jarvis' (or similar) is heard.
         """
         try:
-            import whisper
             import sounddevice as sd
             import soundfile as sf
             import numpy as np
@@ -362,10 +361,19 @@ class WakeWordDetector:
                 return
 
             samplerate = 16000
-            chunk_secs = 3
+            chunk_secs = 2  # shorter chunks = faster response
+
+            # All the ways someone might naturally say the wake word
+            wake_variants = [
+                "hey jarvis", "ok jarvis", "yo jarvis", "hi jarvis",
+                "hello jarvis", "jarvis", "hey travis",  # common mishear
+                "hey davis", "hey harris",               # common mishears
+            ]
+
+            print("[WakeWord] Listening for 'Hey Jarvis'...")
 
             while self._running:
-                self._paused.wait()  # block while paused
+                self._paused.wait()
 
                 audio = sd.rec(int(chunk_secs * samplerate), samplerate=samplerate,
                                channels=1, dtype='float32')
@@ -375,8 +383,8 @@ class WakeWordDetector:
                     continue
 
                 audio_flat = audio.flatten()
-                # Quick energy check to skip silence
-                if np.abs(audio_flat).mean() < 0.002:
+                # Skip near-silence (no point transcribing empty audio)
+                if np.abs(audio_flat).mean() < 0.003:
                     continue
 
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -384,7 +392,8 @@ class WakeWordDetector:
                 sf.write(tmp_path, audio_flat, samplerate)
                 try:
                     result = model.transcribe(tmp_path, language="en",
-                                               condition_on_previous_text=False)
+                                               condition_on_previous_text=False,
+                                               fp16=False)
                     transcript = result["text"].lower().strip()
                 except Exception:
                     transcript = ""
@@ -394,10 +403,14 @@ class WakeWordDetector:
                     except Exception:
                         pass
 
-                if self.wake_word in transcript or \
-                   "jarvis" in transcript and ("hey" in transcript or "ok" in transcript or "yo" in transcript):
-                    if self._paused.is_set():
-                        self.callback()
+                if not transcript:
+                    continue
+
+                # Check if any wake variant appears in the transcript
+                detected = any(v in transcript for v in wake_variants)
+                if detected and self._paused.is_set():
+                    print(f"[WakeWord] Heard: '{transcript}' → waking up")
+                    self.callback()
 
         except Exception as e:
             print(f"[WakeWord/simple] Error: {e}")
@@ -792,7 +805,11 @@ class CommandHandler:
         if any(k in t for k in ["help", "what can you do", "commands", "capabilities"]):
             return self._help()
 
-        if any(k in t for k in ["stop", "goodbye", "bye jarvis", "shut down", "exit", "quit jarvis"]):
+        if any(k in t for k in [
+            "stop", "goodbye", "bye jarvis", "shut down", "shutdown",
+            "exit", "quit jarvis", "turn off", "power off", "see you later",
+            "that's all", "thats all", "i'm done", "close jarvis", "stop jarvis"
+        ]):
             return "SHUTDOWN"
 
         # ── Phase 4: Screen vision ─────────────────────────────────────────
@@ -1135,11 +1152,20 @@ def main():
                 if wake_triggered.is_set():
                     wake_triggered.clear()
                     wake.pause()
-                    speak("Yes, sir?", None)  # don't re-pause, already paused
+                    import random
+                    greetings = [
+                        "Yes sir?",
+                        "I'm listening.",
+                        "What's up?",
+                        "Yes, how can I help?",
+                        "Go ahead.",
+                        "I'm here.",
+                    ]
+                    speak(random.choice(greetings), None)
                     user_input = listen_microphone()
                     wake.resume()
                     if not user_input:
-                        speak("I didn't catch that.", wake)
+                        speak("I didn't catch that, say hey Jarvis to try again.", wake)
                         continue
                 else:
                     user_input = typed[0]
@@ -1164,7 +1190,16 @@ def main():
             response = handler.handle(user_input)
 
             if response == "SHUTDOWN":
-                speak("Shutting down. Goodbye, sir.", wake)
+                import random
+                goodbyes = [
+                    "Goodbye sir, take care!",
+                    "See you later sir. Shutting down now.",
+                    "Alright, signing off. Goodbye!",
+                    "Take care sir. I'll be here when you need me.",
+                    "Goodbye! It was good talking with you."
+                ]
+                speak(random.choice(goodbyes), wake)
+                time.sleep(1)
                 wake.stop()
                 memory.save()
                 break
@@ -1173,7 +1208,7 @@ def main():
                 speak(response, wake)
 
         except KeyboardInterrupt:
-            speak("Jarvis signing off.", wake)
+            speak("Alright, shutting down. Goodbye!", wake)
             wake.stop()
             memory.save()
             break
