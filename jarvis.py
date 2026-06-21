@@ -367,14 +367,19 @@ class WakeWordDetector:
                     continue
 
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp_path = f.name
-            sf.write(tmp_path, audio, samplerate)
-            result = model.transcribe(tmp_path, language="en")
-            text = result["text"].strip()
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+                    tmp_path = f.name
+                sf.write(tmp_path, audio_flat, samplerate)
+                try:
+                    result = model.transcribe(tmp_path, language="en",
+                                               condition_on_previous_text=False)
+                    transcript = result["text"].lower().strip()
+                except Exception:
+                    transcript = ""
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
 
                 if self.wake_word in transcript or \
                    "jarvis" in transcript and ("hey" in transcript or "ok" in transcript or "yo" in transcript):
@@ -447,10 +452,12 @@ def listen_microphone(duration: int = None) -> str | None:
         audio = audio.flatten()
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp_path = f.name
-            sf.write(tmp_path, audio, samplerate)
+            tmp_path = f.name
+        sf.write(tmp_path, audio, samplerate)
+        try:
             result = model.transcribe(tmp_path, language="en")
             text = result["text"].strip()
+        finally:
             try:
                 os.unlink(tmp_path)
             except Exception:
