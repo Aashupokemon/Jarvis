@@ -40,17 +40,30 @@ PLUGINS_DIR.mkdir(exist_ok=True)
 # ─── Config ──────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
     "wake_word": "hey jarvis",
-    "wake_word_engine": "simple",       # "simple" (keyword match) or "porcupine" (accurate)
-    "porcupine_access_key": "",         # Only needed if engine = "porcupine"
-    "voice_rate": 175,
-    "voice_volume": 0.9,
-    "whisper_model": "base",            # tiny / base / small / medium
-    "listen_duration": 6,              # seconds to record after wake word
-    "memory_max_turns": 40,            # turns to keep in long-term memory
-    "context_window": 20,              # turns sent to Claude per request
-    "personality": "You are Jarvis, a brilliant AI laptop assistant inspired by Iron Man. "
-                   "You are helpful, direct, and subtly witty. Keep responses concise (1-3 sentences) "
-                   "unless detail is explicitly needed. Address the user as 'sir' occasionally."
+    "wake_word_engine": "simple",
+    "porcupine_access_key": "",
+    "voice_rate": 165,
+    "voice_volume": 1.0,
+    "voice_name": "",
+    "whisper_model": "base",
+    "listen_duration": 6,
+    "memory_max_turns": 40,
+    "context_window": 20,
+    "personality": (
+        "You are Jarvis, a friendly AI assistant living inside this laptop. "
+        "You are having a real spoken conversation — your words come out of speakers, not a screen. "
+        "Rules you must always follow:\n"
+        "- Talk like a real person, not like someone writing an essay.\n"
+        "- Keep every reply SHORT — 1 to 3 sentences max unless the user asks for more detail.\n"
+        "- Never use bullet points, numbered lists, asterisks, or headers — they sound terrible spoken aloud.\n"
+        "- Never start with filler like 'Certainly!', 'Absolutely!', 'Great question!' — just answer.\n"
+        "- Use contractions: you're, I'll, that's, don't, it's — formal words sound robotic when spoken.\n"
+        "- For completed actions just say something brief like 'Done' or 'On it'.\n"
+        "- Be warm and slightly witty — like a smart friend, not a corporate assistant.\n"
+        "- Occasionally call the user 'sir' but don't overdo it.\n"
+        "- If you don't know something, say so simply and move on.\n"
+        "- For anything technical, give the short answer first and offer to explain more if they want."
+    )
 }
 
 def load_config() -> dict:
@@ -486,54 +499,98 @@ def load_whisper_model() -> bool:
 
 # ─── Voice Output ─────────────────────────────────────────────────────────────
 _tts_engine = None
+_tts_lock = threading.Lock()
 
 def _get_tts_engine():
     global _tts_engine
-    if _tts_engine is None:
+    if _tts_engine is not None:
+        return _tts_engine
+    with _tts_lock:
+        if _tts_engine is not None:
+            return _tts_engine
         try:
             import pyttsx3
-            _tts_engine = pyttsx3.init()
-            _tts_engine.setProperty('rate', CONFIG["voice_rate"])
-            _tts_engine.setProperty('volume', CONFIG["voice_volume"])
-            voices = _tts_engine.getProperty('voices')
+            engine = pyttsx3.init()
+            engine.setProperty('rate', CONFIG.get("voice_rate", 165))
+            engine.setProperty('volume', CONFIG.get("voice_volume", 1.0))
+            voices = engine.getProperty('voices')
+            # On Windows, pick a natural-sounding English voice
+            # Prefer Zira (female) or David (male) — both ship with Windows 10/11
+            preferred = CONFIG.get("voice_name", "").lower()
+            chosen = None
             for v in voices:
-                if 'english' in v.name.lower() or 'david' in v.name.lower():
-                    _tts_engine.setProperty('voice', v.id)
-                    break
-        except Exception:
-            pass
-    return _tts_engine
+                vname = v.name.lower()
+                if preferred and preferred in vname:
+                    chosen = v; break
+                if 'zira' in vname or 'david' in vname or 'mark' in vname:
+                    chosen = v; break
+            if not chosen and voices:
+                # fallback: first English voice
+                for v in voices:
+                    if 'english' in v.name.lower():
+                        chosen = v; break
+            if chosen:
+                engine.setProperty('voice', chosen.id)
+                print(f"🔊 Voice: {chosen.name}")
+            elif voices:
+                engine.setProperty('voice', voices[0].id)
+                print(f"🔊 Voice: {voices[0].name}")
+            _tts_engine = engine
+            return _tts_engine
+        except Exception as e:
+            print(f"[TTS] pyttsx3 init failed: {e}")
+            return None
+
+
+def _speak_windows_fallback(text: str):
+    """Use Windows built-in PowerShell TTS as a fallback."""
+    # Escape single quotes in text so PowerShell doesn't break
+    safe = text.replace("'", " ").replace('"', ' ')
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Add-Type -AssemblyName System.Speech; "
+             f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             f"$s.Rate = 1; "
+             f"$s.Volume = 100; "
+             f"$s.Speak('{safe}')"],
+            check=False, timeout=30
+        )
+    except Exception as e:
+        print(f"[TTS] PowerShell fallback also failed: {e}")
+
 
 def speak(text: str, wake_detector: WakeWordDetector = None):
-    """Speak text, pausing wake word detection while doing so."""
+    """Speak text aloud, pausing wake word detection while doing so."""
+    if not text or not text.strip():
+        return
     print(f"\n🤖 Jarvis: {text}")
     if wake_detector:
         wake_detector.pause()
+    spoken = False
     try:
         engine = _get_tts_engine()
         if engine:
             engine.say(text)
             engine.runAndWait()
-        else:
-            raise RuntimeError("No TTS engine")
-    except Exception:
+            spoken = True
+    except Exception as e:
+        print(f"[TTS] pyttsx3 error: {e} — trying fallback")
+        # Reset engine so next call re-initialises it cleanly
+        global _tts_engine
+        _tts_engine = None
+
+    if not spoken:
         os_name = platform.system()
-        try:
-            if os_name == "Darwin":
-                subprocess.run(["say", text], check=False)
-            elif os_name == "Linux":
-                subprocess.run(["espeak", "-s", "175", text], check=False)
-            elif os_name == "Windows":
-                subprocess.run(
-                    ["powershell", "-Command",
-                     f"(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{text}')"],
-                    check=False
-                )
-        except Exception:
-            pass
-    finally:
-        if wake_detector:
-            wake_detector.resume()
+        if os_name == "Windows":
+            _speak_windows_fallback(text)
+        elif os_name == "Darwin":
+            subprocess.run(["say", "-r", "175", text], check=False)
+        elif os_name == "Linux":
+            subprocess.run(["espeak", "-s", "175", text], check=False)
+
+    if wake_detector:
+        wake_detector.resume()
 
 # ─── Claude AI Brain ──────────────────────────────────────────────────────────
 class JarvisAI:
