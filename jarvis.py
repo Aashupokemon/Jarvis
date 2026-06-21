@@ -513,113 +513,162 @@ def load_whisper_model() -> bool:
 # ─── Voice Output ─────────────────────────────────────────────────────────────
 _tts_engine = None
 _tts_lock = threading.Lock()
+_tts_mode = None   # "pyttsx3" | "powershell" | "silent"
 
-def _get_tts_engine():
-    global _tts_engine
-    if _tts_engine is not None:
-        return _tts_engine
-    with _tts_lock:
-        if _tts_engine is not None:
-            return _tts_engine
-        try:
-            import pyttsx3
-            engine = pyttsx3.init()
-            engine.setProperty('rate', CONFIG.get("voice_rate", 165))
-            engine.setProperty('volume', CONFIG.get("voice_volume", 1.0))
-            voices = engine.getProperty('voices')
-            # On Windows, pick a natural-sounding English voice
-            # Prefer Zira (female) or David (male) — both ship with Windows 10/11
-            preferred = CONFIG.get("voice_name", "").lower()
-            chosen = None
-            for v in voices:
-                vname = v.name.lower()
-                if preferred and preferred in vname:
-                    chosen = v; break
-                if 'zira' in vname or 'david' in vname or 'mark' in vname:
-                    chosen = v; break
-            if not chosen and voices:
-                # fallback: first English voice
-                for v in voices:
-                    if 'english' in v.name.lower():
-                        chosen = v; break
-            if chosen:
-                engine.setProperty('voice', chosen.id)
-                print(f"🔊 Voice: {chosen.name}")
-            elif voices:
-                engine.setProperty('voice', voices[0].id)
-                print(f"🔊 Voice: {voices[0].name}")
-            _tts_engine = engine
-            return _tts_engine
-        except Exception as e:
-            print(f"[TTS] pyttsx3 init failed: {e}")
-            return None
+def _init_tts():
+    """Detect which TTS method works on this machine and cache it."""
+    global _tts_engine, _tts_mode
 
+    if _tts_mode is not None:
+        return  # already initialised
 
-def _speak_windows_fallback(text: str):
-    """Use Windows built-in PowerShell TTS as a fallback."""
-    # Escape single quotes in text so PowerShell doesn't break
-    safe = text.replace("'", " ").replace('"', ' ')
+    # Try pyttsx3 first
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             f"Add-Type -AssemblyName System.Speech; "
-             f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-             f"$s.Rate = 1; "
-             f"$s.Volume = 100; "
-             f"$s.Speak('{safe}')"],
-            check=False, timeout=30
-        )
+        import pyttsx3
+        engine = pyttsx3.init()
+        voices = engine.getProperty('voices') or []
+
+        # On Windows, pick the best English voice (Zira=female, David/Mark=male)
+        chosen = None
+        prefer = CONFIG.get("voice_name", "").lower()
+        for v in voices:
+            n = v.name.lower()
+            if prefer and prefer in n:
+                chosen = v; break
+            if any(x in n for x in ['zira', 'david', 'mark', 'hazel']):
+                chosen = v; break
+        if not chosen:
+            for v in voices:
+                if 'en' in v.id.lower() or 'english' in v.name.lower():
+                    chosen = v; break
+        if not chosen and voices:
+            chosen = voices[0]
+        if chosen:
+            engine.setProperty('voice', chosen.id)
+
+        engine.setProperty('rate', CONFIG.get("voice_rate", 165))
+        engine.setProperty('volume', CONFIG.get("voice_volume", 1.0))
+
+        _tts_engine = engine
+        _tts_mode = "pyttsx3"
+        print(f"🔊 TTS ready (pyttsx3) — voice: {chosen.name if chosen else 'default'}")
+        return
     except Exception as e:
-        print(f"[TTS] PowerShell fallback also failed: {e}")
+        print(f"[TTS] pyttsx3 failed: {e}")
+        print("[TTS] Trying Windows built-in PowerShell voice...")
+
+    # Fallback: Windows PowerShell built-in TTS (always available on Windows 10/11)
+    if platform.system() == "Windows":
+        try:
+            test = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Add-Type -AssemblyName System.Speech; "
+                 "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                 "$s.Volume = 100; $s.Rate = 1; $s.Speak('voice test')"],
+                timeout=15, capture_output=True
+            )
+            if test.returncode == 0:
+                _tts_mode = "powershell"
+                print("🔊 TTS ready (Windows PowerShell built-in voice)")
+                return
+            else:
+                print(f"[TTS] PowerShell TTS returned code {test.returncode}")
+        except Exception as e:
+            print(f"[TTS] PowerShell TTS also failed: {e}")
+
+    _tts_mode = "silent"
+    print("⚠️  TTS unavailable — Jarvis will type only.")
 
 
-def speak(text: str, wake_detector: WakeWordDetector = None):
-    """Speak text aloud, pausing wake word detection while doing so."""
+def _do_speak(text: str):
+    """Actually speak text using the best available method."""
+    global _tts_engine, _tts_mode
+
+    if _tts_mode is None:
+        _init_tts()
+
+    if _tts_mode == "silent":
+        return
+
+    if _tts_mode == "pyttsx3":
+        try:
+            with _tts_lock:
+                _tts_engine.say(text)
+                _tts_engine.runAndWait()
+            return
+        except Exception as e:
+            print(f"[TTS] pyttsx3 error mid-session: {e} — switching to PowerShell")
+            _tts_engine = None
+            _tts_mode = "powershell"
+
+    if _tts_mode == "powershell":
+        safe = text.replace("'", " ").replace('"', ' ').replace('\n', ' ')
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Add-Type -AssemblyName System.Speech; "
+                 f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                 f"$s.Rate = 1; $s.Volume = 100; $s.Speak('{safe}')"],
+                timeout=60, check=False
+            )
+        except Exception as e:
+            print(f"[TTS] PowerShell speak failed: {e}")
+
+
+def speak(text: str, wake_detector=None):
+    """Print and speak a line. Pauses wake word detection while speaking."""
     if not text or not text.strip():
         return
     print(f"\n🤖 Jarvis: {text}")
     if wake_detector:
         wake_detector.pause()
-    spoken = False
     try:
-        engine = _get_tts_engine()
-        if engine:
-            engine.say(text)
-            engine.runAndWait()
-            spoken = True
-    except Exception as e:
-        print(f"[TTS] pyttsx3 error: {e} — trying fallback")
-        # Reset engine so next call re-initialises it cleanly
-        global _tts_engine
-        _tts_engine = None
+        _do_speak(text)
+    finally:
+        if wake_detector:
+            wake_detector.resume()
 
-    if not spoken:
-        os_name = platform.system()
-        if os_name == "Windows":
-            _speak_windows_fallback(text)
-        elif os_name == "Darwin":
-            subprocess.run(["say", "-r", "175", text], check=False)
-        elif os_name == "Linux":
-            subprocess.run(["espeak", "-s", "175", text], check=False)
 
-    if wake_detector:
-        wake_detector.resume()
+def run_tts_test():
+    """Called once at startup to confirm audio is working."""
+    _init_tts()
+    if _tts_mode == "silent":
+        print("\n⚠️  No working TTS found. Try: pip uninstall pyttsx3 && pip install pyttsx3")
+    else:
+        print(f"✅ Audio test passed — mode: {_tts_mode}")
 
 # ─── Claude AI Brain ──────────────────────────────────────────────────────────
 class JarvisAI:
     def __init__(self, api_key: str, memory: Memory):
-        self.api_key = api_key
-        self.memory  = memory
+        self.api_key      = api_key
+        self.memory       = memory
+        self.mentor_active = False
+
+    MENTOR_PROMPT = (
+        "You are Jarvis in mentor/friend mode — a warm, emotionally intelligent friend "
+        "who also happens to be extremely knowledgeable. "
+        "The user is talking to you like a close friend for advice, support, or to think something through. "
+        "Rules for this mode:\n"
+        "- Be warm, empathetic, and conversational — like a best friend, not a consultant.\n"
+        "- Ask follow-up questions to understand their situation better.\n"
+        "- Don't lecture or give long essays — have a back-and-forth conversation.\n"
+        "- Validate their feelings before jumping to solutions.\n"
+        "- Keep replies short (2-4 sentences) — this is a spoken conversation.\n"
+        "- Use their name if you know it. No bullet points, no lists, no markdown.\n"
+        "- If they seem stressed, acknowledge it first before helping.\n"
+        "- Be honest even if it's not what they want to hear — a good friend tells the truth."
+    )
 
     def chat(self, user_message: str, extra_context: str = "") -> str:
         """Send message to Claude with full persistent memory context."""
-        # Build system prompt with known facts injected
         facts_str = ""
         if self.memory.facts:
             facts_str = "\n\nKnown facts about the user:\n" + \
                         "\n".join(f"- {k}: {v}" for k, v in self.memory.facts.items())
 
-        system = CONFIG["personality"] + facts_str
+        # Switch personality for mentor mode
+        base = self.MENTOR_PROMPT if self.mentor_active else CONFIG["personality"]
+        system = base + facts_str
         if extra_context:
             system += f"\n\nAdditional context: {extra_context}"
 
@@ -643,11 +692,26 @@ class JarvisAI:
                 timeout=15,
             )
             data = response.json()
+            # Show the real API error so the user knows what's wrong
+            if "error" in data:
+                err_msg = data["error"].get("message", str(data["error"]))
+                err_type = data["error"].get("type", "")
+                if "api_key" in err_msg.lower() or "auth" in err_type.lower():
+                    return "Your API key isn't working sir. Please check it in the Anthropic console."
+                if "credit" in err_msg.lower() or "billing" in err_msg.lower():
+                    return "Looks like you're out of API credits sir. Add some at console.anthropic.com."
+                return f"The AI returned an error: {err_msg}"
             reply = data["content"][0]["text"]
             self.memory.add_turn("assistant", reply)
             return reply
+        except requests.exceptions.ConnectionError:
+            return "I can't reach the internet right now sir. Check your connection."
+        except requests.exceptions.Timeout:
+            return "The AI took too long to respond sir. Try again."
+        except KeyError as e:
+            return f"Unexpected API response sir. Raw reply: {data}"
         except Exception as e:
-            return f"I seem to be having connectivity issues, sir. {e}"
+            return f"Something went wrong sir: {e}"
 
 # ─── Command Handler ──────────────────────────────────────────────────────────
 class CommandHandler:
@@ -660,6 +724,7 @@ class CommandHandler:
         self.plugins      = plugins
         self.wake         = wake_detector
         self.os_name      = platform.system()
+        self.mentor_mode  = False  # toggled by "mentor mode" command
 
         # ── Phase 4 modules (optional — degrade gracefully if unavailable) ──
         self.vision    = None
@@ -739,31 +804,72 @@ class CommandHandler:
             return self._uptime()
 
         # ── App control ──────────────────────────────────────────────────
+        if any(k in t for k in ["screenshot", "capture screen", "take a screenshot"]):
+            return self._screenshot()
+
         if t.startswith("open "):
             return self._open_app(text[5:].strip())
 
         if t.startswith("close ") or t.startswith("quit ") or t.startswith("kill "):
             return self._close_app(text.split(" ", 1)[1].strip())
 
-        if any(k in t for k in ["volume up", "increase volume", "louder"]):
+        # ── Mentor / conversation mode ────────────────────────────────────
+        if any(k in t for k in [
+            "mentor mode", "start mentor", "be my mentor", "talk to me",
+            "help me think", "i need advice", "be my friend", "conversation mode"
+        ]):
+            return self._start_mentor_mode()
+
+        if any(k in t for k in ["exit mentor", "stop mentor", "leave mentor", "end mentor"]):
+            return self._stop_mentor_mode()
+
+        # ── Voice to Notepad (dictation) ─────────────────────────────────
+        if any(k in t for k in [
+            "open notepad", "start notepad", "take notes", "write this down",
+            "dictate", "start dictation", "voice note", "write a note",
+            "note this", "type this"
+        ]):
+            return self._start_dictation()
+
+        # ── System controls ──────────────────────────────────────────────
+        if any(k in t for k in ["volume up", "increase volume", "louder", "turn up"]):
             return self._volume("up")
 
-        if any(k in t for k in ["volume down", "decrease volume", "quieter"]):
+        if any(k in t for k in ["volume down", "decrease volume", "quieter", "turn down"]):
             return self._volume("down")
 
-        if any(k in t for k in ["mute", "silence audio"]):
+        if any(k in t for k in ["mute", "silence audio", "mute volume"]):
             return self._volume("mute")
 
-        if any(k in t for k in ["screenshot", "capture screen", "take a screenshot"]):
-            return self._screenshot()
+        if any(k in t for k in ["unmute", "unmute volume", "turn sound on"]):
+            return self._volume("unmute")
+
+        if any(k in t for k in ["set volume"]):
+            return self._volume_set(t)
+
+        if any(k in t for k in ["brightness up", "increase brightness", "brighter", "screen brighter"]):
+            return self._brightness("up")
+
+        if any(k in t for k in ["brightness down", "decrease brightness", "dimmer", "screen dimmer"]):
+            return self._brightness("down")
+
+        if any(k in t for k in ["set brightness"]):
+            return self._brightness_set(t)
+
+        if any(k in t for k in ["shutdown computer", "shut down computer", "turn off computer",
+                                  "shutdown laptop", "shut down laptop", "power off computer"]):
+            return self._system_shutdown()
+
+        if any(k in t for k in ["restart computer", "reboot", "restart laptop", "restart system"]):
+            return self._system_restart()
 
         if any(k in t for k in ["lock screen", "lock my screen", "lock computer"]):
             return self._lock_screen()
 
-        if any(k in t for k in ["sleep", "hibernate", "suspend"]):
+        if any(k in t for k in ["sleep", "hibernate", "suspend", "put to sleep"]):
             return self._sleep()
 
-        # ── Web ──────────────────────────────────────────────────────────
+        # ── App control ──────────────────────────────────────────────────
         if t.startswith("search ") or t.startswith("google "):
             return self._web_search(t.split(" ", 1)[1])
 
@@ -917,29 +1023,88 @@ class CommandHandler:
             return "Couldn't fetch weather right now."
 
     def _open_app(self, app: str) -> str:
-        app_lower = app.lower()
+        app_lower = app.lower().strip()
+
+        # Common Windows app name → executable map
+        WIN_APPS = {
+            "notepad":       "notepad.exe",
+            "calculator":    "calc.exe",
+            "paint":         "mspaint.exe",
+            "word":          "winword.exe",
+            "excel":         "excel.exe",
+            "powerpoint":    "powerpnt.exe",
+            "outlook":       "outlook.exe",
+            "file explorer": "explorer.exe",
+            "explorer":      "explorer.exe",
+            "task manager":  "taskmgr.exe",
+            "control panel": "control.exe",
+            "settings":      "ms-settings:",
+            "camera":        "microsoft.windows.camera:",
+            "calendar":      "outlookcal:",
+            "maps":          "bingmaps:",
+            "store":         "ms-windows-store:",
+            "photos":        "ms-photos:",
+            "snipping tool": "snippingtool.exe",
+            "cmd":           "cmd.exe",
+            "command prompt":"cmd.exe",
+            "powershell":    "powershell.exe",
+            "vs code":       "code.exe",
+            "vscode":        "code.exe",
+            "chrome":        "chrome.exe",
+            "firefox":       "firefox.exe",
+            "edge":          "msedge.exe",
+            "vlc":           "vlc.exe",
+            "zoom":          "zoom.exe",
+            "teams":         "teams.exe",
+            "discord":       "discord.exe",
+            "steam":         "steam.exe",
+            "spotify":       None,   # web fallback
+            "gmail":         None,
+            "youtube":       None,
+            "whatsapp":      "whatsapp.exe",
+        }
+        WEB_APPS = {
+            "spotify":  "https://open.spotify.com",
+            "gmail":    "https://mail.google.com",
+            "youtube":  "https://www.youtube.com",
+            "notion":   "https://www.notion.so",
+            "slack":    "https://app.slack.com",
+            "maps":     "https://maps.google.com",
+            "calendar": "https://calendar.google.com",
+            "github":   "https://github.com",
+            "chatgpt":  "https://chat.openai.com",
+        }
+
+        # Check web apps first
+        for k, url in WEB_APPS.items():
+            if k in app_lower:
+                webbrowser.open(url)
+                return f"Opening {app} in your browser."
+
+        # Try Windows executable map
+        exe = WIN_APPS.get(app_lower)
+        if exe:
+            try:
+                if exe.endswith(":"):   # ms-settings: style URI
+                    os.startfile(exe)
+                else:
+                    subprocess.Popen(exe, shell=True)
+                return f"Opening {app}."
+            except Exception as e:
+                return f"Couldn't open {app}: {e}"
+
+        # Generic fallback — try running the name directly
         try:
-            if self.os_name == "Darwin":
+            if self.os_name == "Windows":
+                subprocess.Popen(app, shell=True)
+            elif self.os_name == "Darwin":
                 subprocess.Popen(["open", "-a", app])
             elif self.os_name == "Linux":
                 subprocess.Popen([app_lower])
-            elif self.os_name == "Windows":
-                os.startfile(app)
             return f"Opening {app}."
         except Exception:
-            web_apps = {
-                "spotify":  "https://open.spotify.com",
-                "gmail":    "https://mail.google.com",
-                "maps":     "https://maps.google.com",
-                "calendar": "https://calendar.google.com",
-                "notion":   "https://www.notion.so",
-                "slack":    "https://app.slack.com",
-            }
-            for k, url in web_apps.items():
-                if k in app_lower:
-                    webbrowser.open(url)
-                    return f"Opening {app} in browser."
-            return f"Couldn't find {app}. Make sure it's installed."
+            return (f"I couldn't find {app} on your laptop. "
+                    f"Make sure it's installed and try again.")
 
     def _close_app(self, app: str) -> str:
         killed = []
@@ -1053,25 +1218,274 @@ class CommandHandler:
         except Exception:
             return f"Couldn't list files in {folder}."
 
-    def _help(self) -> str:
-        extras = []
-        if self.vision:
-            extras.append("look at your screen")
-        if self.email_cal and self.email_cal.available:
-            extras.append("check email or your calendar")
-        if self.image_gen:
-            extras.append("generate images from voice descriptions")
-        extra_str = (" I can also " + ", ".join(extras) + ".") if extras else ""
+    # ── Mentor Mode ───────────────────────────────────────────────────────────
+    def _start_mentor_mode(self) -> str:
+        """Switch Jarvis into a warm, conversational friend/mentor persona."""
+        self.mentor_mode = True
+        self.ai.mentor_active = True
+        return (
+            "Mentor mode on. I'm here as your friend now. "
+            "Talk to me about anything — share what's on your mind, ask me anything, "
+            "and I'll help you think it through. What's going on?"
+        )
+
+    def _stop_mentor_mode(self) -> str:
+        self.mentor_mode = False
+        self.ai.mentor_active = False
+        return "Back to assistant mode. Just say hey Jarvis whenever you need me."
+
+    # ── Voice to Notepad (dictation) ──────────────────────────────────────────
+    def _start_dictation(self) -> str:
+        """
+        Opens a dictation session — listens for voice, converts to text,
+        appends to a .txt file, and opens it in Notepad when done.
+        The user says 'stop dictation' or 'save and close' to finish.
+        """
+        ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        doc_path = Path.home() / "Documents" / f"jarvis_note_{ts}.txt"
+        doc_path.parent.mkdir(exist_ok=True)
+
+        speak(
+            "Dictation mode started. Speak your text and I'll write it down. "
+            "Say 'stop dictation' or 'save and close' when you're done.",
+            self.wake
+        )
+
+        lines = []
+        self.wake.pause()
+
+        while True:
+            chunk = listen_microphone(duration=8)
+            if not chunk:
+                speak("I didn't catch that — keep going or say stop dictation.", None)
+                continue
+
+            low = chunk.lower().strip()
+            if any(k in low for k in ["stop dictation", "save and close", "finish note",
+                                       "done dictating", "close notepad", "stop writing"]):
+                break
+
+            # Use Claude to clean up / punctuate the raw speech transcript
+            cleaned = self._clean_dictation(chunk)
+            lines.append(cleaned)
+            speak(f"Got it.", None)
+
+        self.wake.resume()
+
+        if not lines:
+            return "Nothing was dictated — no file created."
+
+        content = "\n".join(lines)
+        doc_path.write_text(content, encoding="utf-8")
+
+        # Open in Notepad
+        try:
+            subprocess.Popen(["notepad.exe", str(doc_path)])
+        except Exception:
+            pass
 
         return (
-            "I remember our conversations across restarts. "
-            "Tell me facts with 'remember that my name is X'. "
-            "Custom skills run multi-step routines — say 'good morning' or 'focus mode'. "
-            "Plugins in the plugins folder extend me automatically. "
-            "Say 'Hey Jarvis' anytime to activate me — no button needed. "
-            "I can open apps, control volume, search, and check system stats."
-            + extra_str
-            + " For images, say 'draw a sunset' or 'generate an image of a dragon'."
+            f"Done! I've written {len(lines)} paragraph{'s' if len(lines)>1 else ''} "
+            f"and saved your note as {doc_path.name}. Opening it in Notepad now."
+        )
+
+    def _clean_dictation(self, raw: str) -> str:
+        """Ask Claude to add punctuation and capitalisation to raw spoken text."""
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.ai.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 300,
+                    "system": (
+                        "You are a transcription assistant. "
+                        "The user has spoken text captured by voice recognition. "
+                        "Add proper punctuation, capitalisation, and paragraph breaks. "
+                        "Fix obvious speech-to-text errors. "
+                        "Return ONLY the cleaned text — nothing else."
+                    ),
+                    "messages": [{"role": "user", "content": raw}],
+                },
+                timeout=10,
+            )
+            return resp.json()["content"][0]["text"].strip()
+        except Exception:
+            return raw  # fallback: return raw if Claude unreachable
+
+    # ── Volume controls (Windows-native, no third-party tools needed) ─────────
+    def _volume(self, direction: str) -> str:
+        try:
+            if self.os_name == "Windows":
+                # Use PowerShell + Windows Audio COM — no nircmd.exe needed
+                scripts = {
+                    "up":     "(New-Object -ComObject WScript.Shell).SendKeys([char]175); "
+                              "(New-Object -ComObject WScript.Shell).SendKeys([char]175)",
+                    "down":   "(New-Object -ComObject WScript.Shell).SendKeys([char]174); "
+                              "(New-Object -ComObject WScript.Shell).SendKeys([char]174)",
+                    "mute":   "(New-Object -ComObject WScript.Shell).SendKeys([char]173)",
+                    "unmute": "(New-Object -ComObject WScript.Shell).SendKeys([char]173)",
+                }
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", scripts[direction]],
+                    check=False, timeout=5
+                )
+            elif self.os_name == "Darwin":
+                cmds = {
+                    "up":   "set volume output volume (output volume of (get volume settings) + 10)",
+                    "down": "set volume output volume (output volume of (get volume settings) - 10)",
+                    "mute": "set volume with output muted",
+                    "unmute": "set volume without output muted",
+                }
+                subprocess.run(["osascript", "-e", cmds[direction]])
+            elif self.os_name == "Linux":
+                cmds = {"up": "5%+", "down": "5%-", "mute": "toggle", "unmute": "unmute"}
+                subprocess.run(["amixer", "-q", "sset", "Master", cmds[direction]])
+
+            msgs = {
+                "up": "Volume up.", "down": "Volume down.",
+                "mute": "Muted.", "unmute": "Unmuted."
+            }
+            return msgs.get(direction, "Done.")
+        except Exception as e:
+            return f"Volume control failed: {e}"
+
+    def _volume_set(self, text: str) -> str:
+        """Set volume to a specific percentage — 'set volume to 50'."""
+        import re
+        m = re.search(r"(\d+)", text)
+        if not m:
+            return "Please say a number, like 'set volume to 50'."
+        level = max(0, min(100, int(m.group(1))))
+        try:
+            if self.os_name == "Windows":
+                # Use PowerShell to set exact volume level via Windows Audio API
+                script = (
+                    f"$volume = {level / 100.0}; "
+                    f"Add-Type -TypeDefinition '"
+                    f"using System.Runtime.InteropServices; "
+                    f"public class Vol {{ "
+                    f"  [DllImport(\"winmm.dll\")] "
+                    f"  public static extern int waveOutSetVolume(IntPtr h, uint vol); "
+                    f"}}'; "
+                    f"$v = [uint32]([Math]::Round($volume * 65535)); "
+                    f"$combined = ($v -shl 16) -bor $v; "
+                    f"[Vol]::waveOutSetVolume([IntPtr]::Zero, $combined) | Out-Null"
+                )
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    check=False, timeout=8
+                )
+            return f"Volume set to {level} percent."
+        except Exception:
+            return f"Tried to set volume to {level}%. Use your keyboard if it didn't work."
+
+    # ── Brightness controls ───────────────────────────────────────────────────
+    def _brightness(self, direction: str) -> str:
+        try:
+            if self.os_name == "Windows":
+                # Read current brightness then adjust
+                ps_get = (
+                    "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness)"
+                    ".CurrentBrightness"
+                )
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_get],
+                    capture_output=True, text=True, timeout=5
+                )
+                current = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 50
+                step = 10
+                new_level = max(0, min(100, current + step if direction == "up" else current - step))
+                ps_set = (
+                    f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
+                    f".WmiSetBrightness(1, {new_level})"
+                )
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_set],
+                    check=False, timeout=5
+                )
+                return f"Brightness {'increased' if direction == 'up' else 'decreased'} to {new_level}%."
+            elif self.os_name == "Darwin":
+                val = "0.8" if direction == "up" else "0.4"
+                subprocess.run(["brightness", val], check=False)
+                return f"Brightness {'increased' if direction == 'up' else 'decreased'}."
+            elif self.os_name == "Linux":
+                subprocess.run(["xbacklight", f"-{direction == 'up' and 'inc' or 'dec'}", "10"])
+                return f"Brightness {'increased' if direction == 'up' else 'decreased'}."
+        except Exception as e:
+            return f"Brightness control failed: {e}"
+
+    def _brightness_set(self, text: str) -> str:
+        import re
+        m = re.search(r"(\d+)", text)
+        if not m:
+            return "Please say a number, like 'set brightness to 70'."
+        level = max(0, min(100, int(m.group(1))))
+        try:
+            if self.os_name == "Windows":
+                ps = (
+                    f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
+                    f".WmiSetBrightness(1, {level})"
+                )
+                subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               check=False, timeout=5)
+            return f"Brightness set to {level}%."
+        except Exception as e:
+            return f"Couldn't set brightness: {e}"
+
+    # ── Shutdown & Restart ────────────────────────────────────────────────────
+    def _system_shutdown(self) -> str:
+        speak(
+            "Alright sir, shutting down your computer in 10 seconds. "
+            "Make sure you've saved everything.",
+            self.wake
+        )
+        time.sleep(2)
+        try:
+            if self.os_name == "Windows":
+                subprocess.run(["shutdown", "/s", "/t", "10"], check=False)
+            elif self.os_name == "Darwin":
+                subprocess.run(["sudo", "shutdown", "-h", "+1"], check=False)
+            elif self.os_name == "Linux":
+                subprocess.run(["shutdown", "-h", "+1"], check=False)
+            return "Shutdown initiated. Goodbye sir!"
+        except Exception as e:
+            return f"Shutdown failed: {e}"
+
+    def _system_restart(self) -> str:
+        speak(
+            "Restarting your computer in 10 seconds sir. "
+            "Save your work now.",
+            self.wake
+        )
+        time.sleep(2)
+        try:
+            if self.os_name == "Windows":
+                subprocess.run(["shutdown", "/r", "/t", "10"], check=False)
+            elif self.os_name == "Darwin":
+                subprocess.run(["sudo", "shutdown", "-r", "+1"], check=False)
+            elif self.os_name == "Linux":
+                subprocess.run(["shutdown", "-r", "+1"], check=False)
+            return "Restart initiated."
+        except Exception as e:
+            return f"Restart failed: {e}"
+
+    def _help(self) -> str:
+        mentor_status = "active" if self.mentor_mode else "off"
+        return (
+            "Here's what I can do. "
+            "For apps: say 'open notepad', 'open chrome', 'open calculator', or any app name. "
+            "For volume: 'volume up', 'volume down', 'mute', 'set volume to 50'. "
+            "For brightness: 'brightness up', 'brightness down', 'set brightness to 70'. "
+            "For system: 'shutdown computer', 'restart computer', 'lock screen', 'sleep'. "
+            "For notes: say 'take notes' or 'start dictation' and I'll write what you say into a file. "
+            f"For mentor mode (currently {mentor_status}): say 'mentor mode' and I'll be your friend and advisor. "
+            "And of course I can answer any question, search the web, check the weather, and generate images. "
+            "What would you like to do?"
         )
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -1095,6 +1509,17 @@ def main():
     memory  = Memory()
     skills  = SkillsManager()
     plugins = PluginManager()
+
+    # ── Test TTS immediately so we know if voice output works ────────────
+    print("\n🔊 Testing voice output...")
+    _init_tts()
+    if _tts_mode == "silent":
+        print("⚠️  WARNING: No working text-to-speech found.")
+        print("   Jarvis will type responses but NOT speak them.")
+        print("   Fix: pip uninstall pyttsx3 && pip install pyttsx3")
+        print("   Or check that your speaker/headphones are connected and not muted.\n")
+    else:
+        print(f"✅ Voice output working — using {_tts_mode}\n")
 
     # Load Whisper
     voice_available = load_whisper_model()
@@ -1152,21 +1577,18 @@ def main():
                 if wake_triggered.is_set():
                     wake_triggered.clear()
                     wake.pause()
-                    import random
-                    greetings = [
-                        "Yes sir?",
-                        "I'm listening.",
-                        "What's up?",
-                        "Yes, how can I help?",
-                        "Go ahead.",
-                        "I'm here.",
-                    ]
-                    speak(random.choice(greetings), None)
+                    speak(
+                        "Hello sir, I'm Jarvis, your personal assistant at work. "
+                        "How may I help you?",
+                        None
+                    )
                     user_input = listen_microphone()
                     wake.resume()
                     if not user_input:
-                        speak("I didn't catch that, say hey Jarvis to try again.", wake)
+                        speak("I didn't catch that. Say hey Jarvis to try again.", wake)
                         continue
+                    # Acknowledge input was captured before processing
+                    speak("I got you.", wake)
                 else:
                     user_input = typed[0]
             else:
@@ -1206,6 +1628,22 @@ def main():
 
             if response:
                 speak(response, wake)
+
+            # ── Mentor mode: keep talking without wake word ───────────────
+            while handler.mentor_mode and use_voice:
+                mentor_prompt = listen_microphone()
+                if not mentor_prompt:
+                    speak("I'm still here — go on.", wake)
+                    continue
+                low = mentor_prompt.lower().strip()
+                if any(k in low for k in ["exit mentor", "stop mentor", "leave mentor",
+                                           "end mentor", "goodbye", "bye"]):
+                    reply = handler._stop_mentor_mode()
+                    speak(reply, wake)
+                    break
+                reply = handler.handle(mentor_prompt)
+                if reply and reply != "SHUTDOWN":
+                    speak(reply, wake)
 
         except KeyboardInterrupt:
             speak("Alright, shutting down. Goodbye!", wake)
