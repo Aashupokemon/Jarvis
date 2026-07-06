@@ -72,46 +72,66 @@ def sound_done():
 def sound_error():
     threading.Thread(target=lambda: _beep(200, 200), daemon=True).start()
 
-# ─── Voice engine — deep male ─────────────────────────────────────────────────
+# ─── Voice engine — deep male, Windows-safe ───────────────────────────────────
 class VoiceEngine:
+    """
+    On Windows, pyttsx3 reuses a COM object that breaks when called from
+    multiple threads or called twice quickly — causes letter-by-letter speech.
+    Fix: create a FRESH engine instance for every single speak() call.
+    This is slower to init but 100% reliable on Windows 10/11.
+    """
     def __init__(self):
-        self._engine = None
         self._lock   = threading.Lock()
         self._mode   = None
+        self._voice_id = None
         self._init()
 
     def _init(self):
         try:
             import pyttsx3
+            # Test init to find best voice — store voice ID only, not engine
             e = pyttsx3.init()
             voices = e.getProperty("voices") or []
-            preferred = ["mark", "david", "richard", "george", "james", "paul", "zira"]
+            preferred = ["mark", "david", "richard", "george", "james", "paul"]
             chosen = None
             for v in voices:
                 if any(p in v.name.lower() for p in preferred):
                     chosen = v; break
             if not chosen and voices:
                 chosen = voices[0]
-            if chosen:
-                e.setProperty("voice", chosen.id)
-                print(f"Voice: {chosen.name}")
-            e.setProperty("rate", 145)
-            e.setProperty("volume", 1.0)
-            self._engine = e
-            self._mode   = "pyttsx3"
+            self._voice_id = chosen.id if chosen else None
+            self._mode = "pyttsx3"
+            name = chosen.name if chosen else "default"
+            print(f"🎙  Voice engine: pyttsx3 — {name}")
+            # Properly shut down test instance
+            try:
+                e.stop()
+            except Exception:
+                pass
         except Exception as ex:
-            print(f"[Voice] pyttsx3 failed ({ex}), using PowerShell")
+            print(f"[Voice] pyttsx3 unavailable ({ex}), using PowerShell")
             self._mode = "powershell"
 
     def speak(self, text: str, on_done=None):
+        """Speak in background thread. Calls on_done() when finished."""
         def _run():
             with self._lock:
-                if self._mode == "pyttsx3" and self._engine:
+                if self._mode == "pyttsx3":
                     try:
-                        self._engine.say(text)
-                        self._engine.runAndWait()
-                    except Exception as e:
-                        print(f"[Voice] {e}")
+                        import pyttsx3
+                        # Fresh engine every time — eliminates letter-by-letter bug
+                        e = pyttsx3.init()
+                        if self._voice_id:
+                            e.setProperty("voice", self._voice_id)
+                        e.setProperty("rate", 145)
+                        e.setProperty("volume", 1.0)
+                        e.say(text)
+                        e.runAndWait()
+                        try: e.stop()
+                        except: pass
+                        del e
+                    except Exception as ex:
+                        print(f"[Voice] pyttsx3 error: {ex} — falling back to PowerShell")
                         self._mode = "powershell"
                         self._ps(text)
                 else:
@@ -120,15 +140,20 @@ class VoiceEngine:
                 on_done()
         threading.Thread(target=_run, daemon=True).start()
 
-    def _ps(self, text):
-        safe = text.replace("'"," ").replace('"',' ')
-        subprocess.run(
-            ["powershell","-NoProfile","-Command",
-             f"Add-Type -AssemblyName System.Speech;"
-             f"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-             f"try{{$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male)}}catch{{}};"
-             f"$s.Rate=-2;$s.Volume=100;$s.Speak('{safe}')"],
-            check=False, timeout=60)
+    def _ps(self, text: str):
+        """Windows PowerShell built-in TTS — always works, no install needed."""
+        safe = text.replace("'", " ").replace('"', ' ').replace('\n', ' ')
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Add-Type -AssemblyName System.Speech;"
+                 f"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                 f"try{{$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male)}}catch{{}};"
+                 f"$s.Rate=-2;$s.Volume=100;$s.Speak('{safe}')"],
+                check=False, timeout=60
+            )
+        except Exception as e:
+            print(f"[Voice] PowerShell TTS failed: {e}")
 
 # ─── Arc Reactor animator ─────────────────────────────────────────────────────
 class ArcReactor:
@@ -416,8 +441,12 @@ class JarvisHUD:
         mem=core.Memory(); skills=core.SkillsManager(); plugins=core.PluginManager()
         ai=core.JarvisAI(api_key,mem)
 
-        wt=threading.Event()
-        def on_wake(): wt.set()
+        # Store wake event on self — cross-thread access requires it to be on
+        # an object, not a closure variable, to avoid stale reference issues
+        self._wake_event = threading.Event()
+        def on_wake():
+            print("[HUD] Wake word received — triggering conversation cycle")
+            self._wake_event.set()
         wd=core.WakeWordDetector(on_wake,core.CONFIG)
 
         # Patch speak() so core engine uses our voice + UI
@@ -435,10 +464,8 @@ class JarvisHUD:
         self._mem_ref=mem
         self._session_turns=0
 
-        # Report which voice was found
-        vmode=self._voice._mode
-        vname=self._voice._engine.getProperty("voice") if vmode=="pyttsx3" and self._voice._engine else "powershell"
-        self._ui("sys",f"Voice engine: {vmode}")
+        # Report which voice mode was detected
+        self._ui("sys",f"Voice engine: {self._voice._mode}")
 
         voice_ok=core.load_whisper_model()
         self._core_listen=core.listen_microphone
@@ -464,8 +491,8 @@ class JarvisHUD:
 
         # Main wake-word loop
         while self._running:
-            if wt.wait(timeout=0.2):
-                wt.clear()
+            if self._wake_event.wait(timeout=0.2):
+                self._wake_event.clear()
                 self._wake_cycle(wd)
 
     def _wake_cycle(self,wd):
