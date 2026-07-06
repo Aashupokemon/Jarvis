@@ -112,8 +112,30 @@ class VoiceEngine:
             print(f"[Voice] pyttsx3 unavailable ({ex}), using PowerShell")
             self._mode = "powershell"
 
+    def _clean(self, text: str) -> str:
+        """
+        Prevent TTS from spelling out abbreviations letter by letter.
+        J.A.R.V.I.S → Jarvis   J.A.R.V.I.S. → Jarvis.
+        A.I. → AI
+        """
+        import re
+        # J.A.R.V.I.S or J.A.R.V.I.S. at a word boundary
+        cleaned = re.sub(
+            r'\bJ\.A\.R\.V\.I\.S\b\.?', 'Jarvis', text, flags=re.IGNORECASE
+        )
+        # Generic 3-letter abbreviations like U.S.A.
+        cleaned = re.sub(
+            r'\b([A-Z])\.([A-Z])\.([A-Z])\.?\b', r'\1\2\3', cleaned
+        )
+        # Generic 2-letter abbreviations like A.I. — remove trailing dot too
+        cleaned = re.sub(
+            r'\b([A-Z])\.([A-Z])\.', r'\1\2 ', cleaned
+        )
+        return cleaned
+
     def speak(self, text: str, on_done=None):
         """Speak in background thread. Calls on_done() when finished."""
+        text = self._clean(text)
         def _run():
             with self._lock:
                 if self._mode == "pyttsx3":
@@ -478,7 +500,7 @@ class JarvisHUD:
             self.root.after(0,lambda: self._wlbl.config(text="● WAKE WORD INACTIVE",fg=RED))
 
         # Startup greeting
-        greet="J.A.R.V.I.S online. All systems operational. How may I assist you today, sir?"
+        greet="Jarvis online. All systems operational. How may I assist you today, sir?"
         self._ui("JARVIS",greet)
         self._set_state(State.SPEAKING)
         sound_wake()
