@@ -730,6 +730,7 @@ class CommandHandler:
         self.vision    = None
         self.email_cal = None
         self.image_gen = None
+        self.agents    = None
         try:
             from screen_vision import ScreenVision
             self.vision = ScreenVision(jarvis_ai.api_key)
@@ -749,6 +750,15 @@ class CommandHandler:
             print(f"[ImageGen] Ready — backend: {self.image_gen.backend.name}")
         except Exception as e:
             print(f"[ImageGen] Unavailable: {e}")
+        try:
+            from agents import AgentCommander
+            self.agents = AgentCommander(
+                api_key=jarvis_ai.api_key,
+                handler=self,
+            )
+            print(f"[Agents] Multi-agent system ready — {len(self.agents.agents)} agents standing by.")
+        except Exception as e:
+            print(f"[Agents] Unavailable: {e}")
 
     def handle(self, text: str) -> str:
         t = text.lower().strip()
@@ -938,6 +948,11 @@ class CommandHandler:
                                              speak_fn=lambda msg: speak(msg, self.wake))
             if img_result:
                 return img_result
+
+        # ── Agents assemble ───────────────────────────────────────────────
+        if self.agents and self.agents.is_trigger(text):
+            # Return immediately with a prompt; actual assembly runs async
+            return "AGENTS_ASSEMBLE"
 
         # ── Default: Claude AI (with memory context) ──────────────────────
         return self.ai.chat(text)
@@ -1625,6 +1640,22 @@ def main():
                 wake.stop()
                 memory.save()
                 break
+
+            if response == "AGENTS_ASSEMBLE":
+                speak("Agents standing by, sir. What's the mission?", wake)
+                # Listen for the actual task
+                if use_voice:
+                    agent_task = listen_microphone()
+                else:
+                    agent_task = input("⌨️  Mission task: ").strip()
+                if agent_task and handler.agents:
+                    def _run_agents():
+                        briefing = handler.agents.assemble(agent_task)
+                        speak(briefing, wake)
+                    threading.Thread(target=_run_agents, daemon=True).start()
+                else:
+                    speak("No task heard. Say agents assemble again when ready.", wake)
+                continue
 
             if response:
                 speak(response, wake)

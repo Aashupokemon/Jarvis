@@ -616,6 +616,41 @@ class JarvisHUD:
             self.root.after(800,self.root.destroy)
             return False
 
+        if resp=="AGENTS_ASSEMBLE":
+            msg="Agents standing by, sir. What's the mission?"
+            self._ui("JARVIS",msg)
+            ev=threading.Event()
+            self._set_state(State.SPEAKING)
+            self._voice.speak(msg,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
+            ev.wait(timeout=8)
+            # Listen for the mission
+            self._set_state(State.LISTENING); sound_listen()
+            self._ui("sys","Listening for mission...")
+            mission=self._core_listen() if hasattr(self,"_core_listen") else None
+            if mission and hasattr(self,"_handler") and self._handler and self._handler.agents:
+                self._ui("YOU",mission)
+                def _run_agents():
+                    # Pass UI + speak callbacks into the commander
+                    self._handler.agents.speak_fn=lambda t: (
+                        self._ui("JARVIS",t),
+                        self._voice.speak(t)
+                    )
+                    self._handler.agents.ui=self._ui
+                    briefing=self._handler.agents.assemble(mission)
+                    self._ui("JARVIS",briefing)
+                    ev2=threading.Event()
+                    self._set_state(State.SPEAKING)
+                    self._voice.speak(briefing,
+                        on_done=lambda:(self._set_state(State.IDLE),ev2.set()))
+                    ev2.wait(timeout=60)
+                    sound_done()
+                threading.Thread(target=_run_agents,daemon=True).start()
+            else:
+                self._ui("sys","No mission heard. Say 'Agents assemble' again.")
+                self._set_state(State.IDLE)
+            if wd: wd.resume()
+            return False
+
         if resp:
             ev=threading.Event()
             self._set_state(State.SPEAKING)
