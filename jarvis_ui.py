@@ -1,795 +1,472 @@
 """
-JARVIS — Iron Man HUD Interface
-Real-time voice conversation with animated UI
-
-Run this instead of jarvis.py for the full experience:
-    python jarvis_ui.py
-
-Features:
-  - Dark futuristic Iron Man HUD design
-  - Animated arc reactor / voice visualizer
-  - Real-time transcript display
-  - Sound effects (beep on wake, chime on response)
-  - Deep male voice via Windows SAPI / pyttsx3
-  - Continuous voice conversation — no button needed
-  - Live status indicator (Idle / Listening / Thinking / Speaking)
+JARVIS — Minimal Voice UI
+Full-screen dark glass, single glowing orb reacts to voice state.
+No buttons, no transcript, no clutter — pure voice control.
 """
-
-import os
-import sys
-import threading
-import time
-import queue
-import math
-import random
-import subprocess
-import platform
-import datetime
-import tkinter as tk
+import os,sys,threading,time,queue,math,random,subprocess,platform
+import datetime,tkinter as tk
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
-sys.path.insert(0, str(BASE_DIR))
-
-# ── Colour palette — Iron Man HUD ─────────────────────────────────────────────
-BG          = "#050d1a"
-BG2         = "#0a1628"
-ACCENT      = "#00d4ff"
-ACCENT2     = "#0088cc"
-GOLD        = "#f5a623"
-RED         = "#ff3b3b"
-GREEN       = "#00ff88"
-DIM         = "#1a3a5c"
-TEXT        = "#b0d4f0"
-TEXT_BRIGHT = "#e8f4ff"
-TEXT_DIM    = "#3a6080"
+BASE_DIR=Path(__file__).parent
+sys.path.insert(0,str(BASE_DIR))
 
 class State:
-    IDLE      = "IDLE"
-    WAKE      = "WAKE"
-    LISTENING = "LISTENING"
-    THINKING  = "THINKING"
-    SPEAKING  = "SPEAKING"
+    IDLE="IDLE";WAKE="WAKE";LISTENING="LISTENING"
+    THINKING="THINKING";SPEAKING="SPEAKING"
 
-# ─── Sound effects ────────────────────────────────────────────────────────────
-def _beep(freq, ms):
+# ── sounds ───────────────────────────────────────────────────────────────────
+def _beep(f,ms):
     try:
-        if platform.system() == "Windows":
-            import winsound
-            winsound.Beep(max(37, min(32767, freq)), ms)
-    except Exception:
-        pass
+        if platform.system()=="Windows":
+            import winsound;winsound.Beep(max(37,min(32767,f)),ms)
+    except:pass
+def snd_wake():   threading.Thread(target=lambda:(_beep(440,60),time.sleep(.05),_beep(880,100)),daemon=True).start()
+def snd_listen(): threading.Thread(target=lambda:_beep(1200,40),daemon=True).start()
+def snd_done():   threading.Thread(target=lambda:(_beep(660,60),time.sleep(.04),_beep(440,80)),daemon=True).start()
+def snd_err():    threading.Thread(target=lambda:_beep(180,180),daemon=True).start()
 
-def sound_wake():
-    threading.Thread(target=lambda: (_beep(440,80), time.sleep(.06), _beep(660,120)), daemon=True).start()
-
-def sound_listen():
-    threading.Thread(target=lambda: _beep(880, 60), daemon=True).start()
-
-def sound_done():
-    threading.Thread(target=lambda: (_beep(660,80), time.sleep(.05), _beep(440,100)), daemon=True).start()
-
-def sound_error():
-    threading.Thread(target=lambda: _beep(200, 200), daemon=True).start()
-
-# ─── Voice engine — deep male, Windows-safe ───────────────────────────────────
-class VoiceEngine:
-    """
-    On Windows, pyttsx3 reuses a COM object that breaks when called from
-    multiple threads or called twice quickly — causes letter-by-letter speech.
-    Fix: create a FRESH engine instance for every single speak() call.
-    This is slower to init but 100% reliable on Windows 10/11.
-    """
+# ── voice ─────────────────────────────────────────────────────────────────────
+class Voice:
     def __init__(self):
-        self._lock   = threading.Lock()
-        self._mode   = None
-        self._voice_id = None
-        self._init()
-
+        self._lock=threading.Lock();self._mode=None;self._vid=None;self._init()
     def _init(self):
         try:
             import pyttsx3
-            # Test init to find best voice — store voice ID only, not engine
-            e = pyttsx3.init()
-            voices = e.getProperty("voices") or []
-            preferred = ["mark", "david", "richard", "george", "james", "paul"]
-            chosen = None
-            for v in voices:
-                if any(p in v.name.lower() for p in preferred):
-                    chosen = v; break
-            if not chosen and voices:
-                chosen = voices[0]
-            self._voice_id = chosen.id if chosen else None
-            self._mode = "pyttsx3"
-            name = chosen.name if chosen else "default"
-            print(f"🎙  Voice engine: pyttsx3 — {name}")
-            # Properly shut down test instance
-            try:
-                e.stop()
-            except Exception:
-                pass
+            e=pyttsx3.init();vs=e.getProperty("voices") or []
+            deep=["mark","david","richard","george","james","paul"]
+            ch=next((v for v in vs if any(d in v.name.lower() for d in deep)),vs[0] if vs else None)
+            self._vid=ch.id if ch else None;self._mode="pyttsx3"
+            print(f"Voice: {ch.name if ch else 'default'}")
+            try:e.stop()
+            except:pass
         except Exception as ex:
-            print(f"[Voice] pyttsx3 unavailable ({ex}), using PowerShell")
-            self._mode = "powershell"
-
-    def _clean(self, text: str) -> str:
-        """
-        Prevent TTS from spelling out abbreviations letter by letter.
-        J.A.R.V.I.S → Jarvis   J.A.R.V.I.S. → Jarvis.
-        A.I. → AI
-        """
+            print(f"[Voice] {ex}");self._mode="powershell"
+    def _clean(self,t):
         import re
-        # J.A.R.V.I.S or J.A.R.V.I.S. at a word boundary
-        cleaned = re.sub(
-            r'\bJ\.A\.R\.V\.I\.S\b\.?', 'Jarvis', text, flags=re.IGNORECASE
-        )
-        # Generic 3-letter abbreviations like U.S.A.
-        cleaned = re.sub(
-            r'\b([A-Z])\.([A-Z])\.([A-Z])\.?\b', r'\1\2\3', cleaned
-        )
-        # Generic 2-letter abbreviations like A.I. — remove trailing dot too
-        cleaned = re.sub(
-            r'\b([A-Z])\.([A-Z])\.', r'\1\2 ', cleaned
-        )
-        return cleaned
-
-    def speak(self, text: str, on_done=None):
-        """Speak in background thread. Calls on_done() when finished."""
-        text = self._clean(text)
-        def _run():
+        t=re.sub(r'\bJ\.A\.R\.V\.I\.S\b\.?','Jarvis',t,flags=re.I)
+        t=re.sub(r'\b([A-Z])\.([A-Z])\.([A-Z])\.?\b',r'\1\2\3',t)
+        t=re.sub(r'\b([A-Z])\.([A-Z])\.',r'\1\2 ',t)
+        return t
+    def speak(self,text,on_done=None):
+        text=self._clean(text)
+        def _r():
             with self._lock:
-                if self._mode == "pyttsx3":
+                if self._mode=="pyttsx3":
                     try:
-                        import pyttsx3
-                        # Fresh engine every time — eliminates letter-by-letter bug
-                        e = pyttsx3.init()
-                        if self._voice_id:
-                            e.setProperty("voice", self._voice_id)
-                        e.setProperty("rate", 145)
-                        e.setProperty("volume", 1.0)
-                        e.say(text)
-                        e.runAndWait()
-                        try: e.stop()
-                        except: pass
+                        import pyttsx3;e=pyttsx3.init()
+                        if self._vid:e.setProperty("voice",self._vid)
+                        e.setProperty("rate",145);e.setProperty("volume",1.0)
+                        e.say(text);e.runAndWait()
+                        try:e.stop()
+                        except:pass
                         del e
                     except Exception as ex:
-                        print(f"[Voice] pyttsx3 error: {ex} — falling back to PowerShell")
-                        self._mode = "powershell"
-                        self._ps(text)
-                else:
-                    self._ps(text)
-            if on_done:
-                on_done()
-        threading.Thread(target=_run, daemon=True).start()
+                        print(f"[Voice] {ex}");self._mode="powershell";self._ps(text)
+                else:self._ps(text)
+            if on_done:on_done()
+        threading.Thread(target=_r,daemon=True).start()
+    def _ps(self,t):
+        s=t.replace("'"," ").replace('"',' ')
+        subprocess.run(["powershell","-NoProfile","-Command",
+            f"Add-Type -AssemblyName System.Speech;$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+            f"try{{$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male)}}catch{{}};"
+            f"$s.Rate=-2;$s.Volume=100;$s.Speak('{s}')"],check=False,timeout=60)
 
-    def _ps(self, text: str):
-        """Windows PowerShell built-in TTS — always works, no install needed."""
-        safe = text.replace("'", " ").replace('"', ' ').replace('\n', ' ')
-        try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f"Add-Type -AssemblyName System.Speech;"
-                 f"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                 f"try{{$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male)}}catch{{}};"
-                 f"$s.Rate=-2;$s.Volume=100;$s.Speak('{safe}')"],
-                check=False, timeout=60
-            )
-        except Exception as e:
-            print(f"[Voice] PowerShell TTS failed: {e}")
-
-# ─── Arc Reactor animator ─────────────────────────────────────────────────────
-class ArcReactor:
-    def __init__(self, canvas, cx, cy, r):
-        self.canvas  = canvas
-        self.cx, self.cy, self.r = cx, cy, r
-        self.angle   = 0.0
-        self.state   = State.IDLE
-        self._pulse  = 0.0
-        self._pd     = 1
-        self._items  = []
-        self._run    = True
+# ── orb renderer ──────────────────────────────────────────────────────────────
+class Orb:
+    """
+    Draws a glowing reactive orb on a tk.Canvas.
+    States:
+      IDLE      — slow dim blue pulse, tiny ring
+      WAKE      — gold flash burst
+      LISTENING — green ring expands with mic energy bars
+      THINKING  — amber spinning petals
+      SPEAKING  — cyan rings ripple outward, bars animate
+    """
+    COLORS={
+        State.IDLE:     ("#001a2e","#003a5c","#0077aa","#00aadd"),
+        State.WAKE:     ("#1a0e00","#3a2000","#cc7700","#ffcc00"),
+        State.LISTENING:("#001a0e","#003a1c","#00aa55","#00ff88"),
+        State.THINKING: ("#1a0800","#3a1500","#cc5500","#ff8800"),
+        State.SPEAKING: ("#001520","#002a40","#0099cc","#00e5ff"),
+    }
+    def __init__(self,canvas,w,h):
+        self.cv=canvas;self.w=w;self.h=h
+        self.cx=w//2;self.cy=h//2
+        self.state=State.IDLE
+        self.t=0.0                   # master time counter
+        self.ripples=[]              # [(birth_t, max_r)]
+        self.bars=[0.0]*32           # voice energy bars
+        self._items=[];self._alive=True
         self._tick()
 
-    def set_state(self, s): self.state = s
+    def set_state(self,s):
+        old=self.state;self.state=s
+        if s==State.WAKE and old!=State.WAKE:
+            self.ripples.append((self.t,220))
+        if s in (State.LISTENING,State.SPEAKING):
+            self.ripples.append((self.t,160))
 
-    def _col(self):
-        return {State.IDLE:ACCENT2, State.WAKE:GOLD, State.LISTENING:GREEN,
-                State.THINKING:GOLD, State.SPEAKING:ACCENT}.get(self.state, ACCENT)
+    def set_bars(self,bars):
+        self.bars=bars[:32]+[0.0]*max(0,32-len(bars))
 
-    @staticmethod
-    def _dim(c, f):
-        c=c.lstrip("#")
-        return f"#{int(int(c[0:2],16)*f):02x}{int(int(c[2:4],16)*f):02x}{int(int(c[4:6],16)*f):02x}"
+    def stop(self):self._alive=False
 
-    @staticmethod
-    def _blend(c1, c2, t):
-        t=max(0.,min(1.,t)); c1=c1.lstrip("#"); c2=c2.lstrip("#")
-        return f"#{int(int(c1[0:2],16)*(1-t)+int(c2[0:2],16)*t):02x}{int(int(c1[2:4],16)*(1-t)+int(c2[2:4],16)*t):02x}{int(int(c1[4:6],16)*(1-t)+int(c2[4:6],16)*t):02x}"
-
+    # ── rendering ─────────────────────────────────────────────────────────────
     def _tick(self):
-        if not self._run: return
-        c=self.canvas; cx=self.cx; cy=self.cy; r=self.r; col=self._col()
+        if not self._alive:return
+        self.t+=0.025
+        # auto-animate bars in active states
+        if self.state==State.SPEAKING:
+            self.bars=[max(0,min(1,0.3+0.5*math.sin(self.t*4+i*0.4)+random.random()*0.2))
+                       for i in range(32)]
+        elif self.state==State.LISTENING:
+            self.bars=[max(0,min(1,0.15+0.35*math.sin(self.t*3+i*0.6)+random.random()*0.25))
+                       for i in range(32)]
+        elif self.state==State.THINKING:
+            self.bars=[max(0,min(1,0.5+0.5*math.sin(self.t*5+i*1.1)))
+                       for i in range(32)]
+        else:
+            self.bars=[max(0,0.05*math.sin(self.t+i*0.3)) for i in range(32)]
 
-        spd={"IDLE":.015,"WAKE":.05,"LISTENING":.07,"THINKING":.06,"SPEAKING":.08}.get(self.state,.02)
-        self._pulse+=spd*self._pd
-        if self._pulse>=1.: self._pd=-1
-        if self._pulse<=0.: self._pd=1
-        p=self._pulse
+        # add ripple on speaking beats
+        if self.state==State.SPEAKING and random.random()<0.04:
+            self.ripples.append((self.t,120+random.randint(0,60)))
+
+        self._draw()
+        self.cv.after(30,self._tick)
+
+    def _draw(self):
+        cv=self.cv;cx=self.cx;cy=self.cy;t=self.t
+        cols=self.COLORS[self.state]
+        bg,mid,bright,core=cols
 
         for i in self._items:
-            try: c.delete(i)
-            except: pass
+            try:cv.delete(i)
+            except:pass
         self._items=[]
 
-        def O(x0,y0,x1,y1,**kw): self._items.append(c.create_oval(x0,y0,x1,y1,**kw))
-        def L(x0,y0,x1,y1,**kw): self._items.append(c.create_line(x0,y0,x1,y1,**kw))
-        def A(x0,y0,x1,y1,**kw): self._items.append(c.create_arc(x0,y0,x1,y1,**kw))
-        def T(x,y,**kw):         self._items.append(c.create_text(x,y,**kw))
+        def O(x0,y0,x1,y1,**kw):self._items.append(cv.create_oval(x0,y0,x1,y1,**kw))
+        def L(x0,y0,x1,y1,**kw):self._items.append(cv.create_line(x0,y0,x1,y1,**kw))
+        def T(x,y,**kw):self._items.append(cv.create_text(x,y,**kw))
+        def A(x0,y0,x1,y1,**kw):self._items.append(cv.create_arc(x0,y0,x1,y1,**kw))
 
-        # outer glow rings
-        for i,rr in enumerate([r+20,r+12,r+5]):
-            O(cx-rr,cy-rr,cx+rr,cy+rr,outline=self._dim(col,.18-.05*i),width=1,fill="")
+        # ── background subtle grid ────────────────────────────────────────────
+        grid_col=self._dim(mid,.25)
+        for gx in range(0,self.w,80):
+            L(gx,0,gx,self.h,fill=grid_col,width=1)
+        for gy in range(0,self.h,80):
+            L(0,gy,self.w,gy,fill=grid_col,width=1)
 
-        # main ring
-        O(cx-r,cy-r,cx+r,cy+r,outline=col,width=2,fill=BG2)
+        # ── corner brackets ───────────────────────────────────────────────────
+        br_col=self._dim(bright,.5);bsz=36
+        for bx,by,dx,dy in [(18,18,1,1),(self.w-18,18,-1,1),
+                              (18,self.h-18,1,-1),(self.w-18,self.h-18,-1,-1)]:
+            L(bx,by,bx+dx*bsz,by,fill=br_col,width=1)
+            L(bx,by,bx,by+dy*bsz,fill=br_col,width=1)
 
-        # rotating tick marks
-        rot_spd={"IDLE":.4,"WAKE":2,"LISTENING":2.5,"THINKING":4,"SPEAKING":2}.get(self.state,.5)
-        for i in range(12):
-            a=math.radians(self.angle+i*30); major=i%3==0
-            x1=cx+math.cos(a)*(r-(8 if major else 4)); y1=cy+math.sin(a)*(r-(8 if major else 4))
-            x2=cx+math.cos(a)*(r-1);                   y2=cy+math.sin(a)*(r-1)
-            L(x1,y1,x2,y2,fill=col if major else self._dim(col,.4),width=2 if major else 1)
+        # ── clock top-right ────────────────────────────────────────────────────
+        now=datetime.datetime.now()
+        T(self.w-22,22,text=now.strftime("%H:%M:%S"),
+          fill=self._dim(bright,.5),font=("Courier New",10,"bold"),anchor="ne")
+        T(self.w-22,36,text=now.strftime("%Y-%m-%d"),
+          fill=self._dim(mid,.5),font=("Courier New",8),anchor="ne")
 
-        # inner spinning segments
-        sr=r-14
-        for i in range(6):
-            a0=self.angle*(1 if i%2==0 else -1)+i*60
-            A(cx-sr,cy-sr,cx+sr,cy+sr,start=a0,extent=38,outline=self._dim(col,.5),width=1,style="arc")
+        # ── state label bottom-centre ─────────────────────────────────────────
+        lbl={"IDLE":"STANDBY","WAKE":"ONLINE","LISTENING":"LISTENING",
+             "THINKING":"PROCESSING","SPEAKING":"SPEAKING"}.get(self.state,"")
+        T(cx,self.h-28,text=f"◉  {lbl}",
+          fill=self._dim(bright,.8),font=("Courier New",11,"bold"),anchor="center")
+        T(cx,self.h-14,text='Say "Hey Jarvis" to wake · "Goodbye" to quit',
+          fill=self._dim(mid,.5),font=("Courier New",8),anchor="center")
 
-        # core
-        cr=int(r*.44)
-        O(cx-cr,cy-cr,cx+cr,cy+cr,fill=self._blend(BG2,col,.12+p*.18),outline=col,width=2)
-        dr=int(cr*.38)
-        O(cx-dr,cy-dr,cx+dr,cy+dr,fill=self._blend(BG2,col,.35+p*.38),outline="")
+        # ── ripple rings ──────────────────────────────────────────────────────
+        dead=[]
+        for rb in self.ripples:
+            birth,maxr=rb
+            age=t-birth;lifetime=1.8
+            if age>lifetime:dead.append(rb);continue
+            frac=age/lifetime
+            r=int(maxr*frac)
+            alpha=1.0-frac
+            rc=self._blend("#000000",bright,alpha*.5)
+            if r>0:
+                O(cx-r,cy-r,cx+r,cy+r,outline=rc,width=max(1,int(2*(1-frac))),fill="")
+        for d in dead:self.ripples.remove(d)
 
-        # state text
-        lbl={"IDLE":"IDLE","WAKE":"LIVE","LISTENING":"HEAR","THINKING":"PROC","SPEAKING":"TALK"}.get(self.state,"")
-        T(cx,cy,text=lbl,fill=col,font=("Courier",7,"bold"),anchor="center")
+        # ── outer halo rings ─────────────────────────────────────────────────
+        pulse_spd={"IDLE":.8,"WAKE":2,"LISTENING":1.5,"THINKING":2,"SPEAKING":1.5}.get(self.state,1)
+        for i,base_r in enumerate([115,95,80]):
+            pulse=math.sin(t*pulse_spd+i*1.1)*.5+.5
+            r=int(base_r+pulse*8*(1 if self.state!=State.IDLE else 3))
+            alpha=(.15+pulse*.25)*(1 if self.state!=State.IDLE else .5)
+            rc=self._blend("#000000",bright,alpha)
+            if r>0:O(cx-r,cy-r,cx+r,cy+r,outline=rc,
+                     width=3-i,fill="")
 
-        # voice bars around reactor when active
-        if self.state in (State.LISTENING, State.SPEAKING):
-            nb=18
-            for i in range(nb):
-                ad=195+i*(150/(nb-1)); a=math.radians(ad)
-                h=(0.25+p*.4+random.random()*.35) if self.state==State.SPEAKING else (0.15+random.random()*.5)
-                h=min(1.,h)
-                br=r+28
-                bx=cx+math.cos(a)*br; by=cy+math.sin(a)*br
-                bx2=cx+math.cos(a)*(br+5+h*18); by2=cy+math.sin(a)*(br+5+h*18)
-                L(bx,by,bx2,by2,fill=self._blend(DIM,col,h),width=2)
+        # ── energy bars ring ─────────────────────────────────────────────────
+        n_bars=32;bar_r=130
+        for i in range(n_bars):
+            a=math.radians(i*(360/n_bars)-90)
+            h=self.bars[i] if i<len(self.bars) else 0
+            bar_len=6+h*55
+            x1=cx+math.cos(a)*bar_r;y1=cy+math.sin(a)*bar_r
+            x2=cx+math.cos(a)*(bar_r+bar_len);y2=cy+math.sin(a)*(bar_r+bar_len)
+            if h>0.05:
+                bc=self._blend(mid,core,h)
+                L(x1,y1,x2,y2,fill=bc,width=max(1,int(h*3+1)))
 
-        self.angle=(self.angle+rot_spd)%360
-        c.after(33,self._tick)
+        # ── THINKING: spinning petals ─────────────────────────────────────────
+        if self.state==State.THINKING:
+            for i in range(8):
+                a=math.radians(t*90+i*45)
+                pr=55+20*math.sin(t*3+i)
+                px=cx+math.cos(a)*pr;py=cy+math.sin(a)*pr
+                ps=int(6+4*math.sin(t*2+i))
+                O(px-ps,py-ps,px+ps,py+ps,
+                  fill=self._blend("#000000",bright,.6+.4*math.sin(t+i)),
+                  outline="")
 
-    def stop(self): self._run=False
+        # ── orb core ─────────────────────────────────────────────────────────
+        # outer soft glow
+        for gr,ga in [(68,.08),(58,.12),(50,.18),(42,.26)]:
+            gc=self._blend("#000000",bright,ga)
+            O(cx-gr,cy-gr,cx+gr,cy+gr,fill=gc,outline="")
 
-# ─── Transcript panel ─────────────────────────────────────────────────────────
-class Transcript:
-    def __init__(self, parent):
-        self.text=tk.Text(parent,bg=BG2,fg=TEXT,font=("Courier",10),
-                          relief="flat",bd=0,wrap="word",state="disabled",
-                          padx=10,pady=8,spacing1=2,spacing3=4)
-        self.text.pack(fill="both",expand=True)
-        self.text.tag_config("you",    foreground=GREEN, font=("Courier",10,"bold"))
-        self.text.tag_config("jarvis", foreground=ACCENT,font=("Courier",10))
-        self.text.tag_config("sys",    foreground=TEXT_DIM,font=("Courier",9,"italic"))
-        self.text.tag_config("ly",     foreground=GREEN,font=("Courier",10,"bold"))
-        self.text.tag_config("lj",     foreground=GOLD, font=("Courier",10,"bold"))
-        self.text.tag_config("ts",     foreground=TEXT_DIM,font=("Courier",8))
-        self._n=0
+        # main sphere gradient illusion (3 concentric ovals)
+        O(cx-38,cy-38,cx+38,cy+38,fill=mid,outline="")
+        O(cx-28,cy-28,cx+28,cy+28,fill=self._blend(mid,bright,.4),outline="")
+        O(cx-18,cy-18,cx+18,cy+18,fill=self._blend(bright,core,.5),outline="")
 
-    def add(self, spk, msg):
-        self.text.configure(state="normal")
-        ts=datetime.datetime.now().strftime("%H:%M:%S")
-        if spk=="YOU":
-            self.text.insert("end",f"\n[{ts}] ","ts")
-            self.text.insert("end","YOU  › ","ly")
-            self.text.insert("end",msg+"\n","you")
-        elif spk=="JARVIS":
-            self.text.insert("end",f"[{ts}] ","ts")
-            self.text.insert("end","JARVIS › ","lj")
-            self.text.insert("end",msg+"\n","jarvis")
-        else:
-            self.text.insert("end",f"  ··· {msg}\n","sys")
-        self._n+=1
-        if self._n>100: self.text.delete("1.0","3.0")
-        self.text.configure(state="disabled")
-        self.text.see("end")
+        # bright hot centre
+        hp=math.sin(t*pulse_spd)*.5+.5
+        O(cx-9,cy-9,cx+9,cy+9,
+          fill=self._blend(bright,core,.6+hp*.4),outline="")
+        O(cx-4,cy-4,cx+4,cy+4,
+          fill=self._blend(core,"#ffffff",.4+hp*.4),outline="")
 
-# ─── Main HUD window ──────────────────────────────────────────────────────────
-class JarvisHUD:
+        # specular highlight
+        O(cx-15,cy-22,cx-5,cy-14,
+          fill=self._blend(bright,"#ffffff",.35),outline="")
+
+        # ── WAKE: gold burst rays ─────────────────────────────────────────────
+        if self.state==State.WAKE:
+            for i in range(12):
+                a=math.radians(t*60+i*30)
+                rlen=60+30*math.sin(t*4+i*1.5)
+                L(cx+math.cos(a)*22,cy+math.sin(a)*22,
+                  cx+math.cos(a)*rlen,cy+math.sin(a)*rlen,
+                  fill=self._blend("#000000","#ffcc00",.5+.5*math.sin(t*3+i)),
+                  width=2)
+
+    @staticmethod
+    def _dim(c,f):
+        h=c.lstrip("#")
+        return"#{:02x}{:02x}{:02x}".format(
+            int(int(h[0:2],16)*f),int(int(h[2:4],16)*f),int(int(h[4:6],16)*f))
+    @staticmethod
+    def _blend(c1,c2,t):
+        t=max(0.,min(1.,t));h1=c1.lstrip("#");h2=c2.lstrip("#")
+        return"#{:02x}{:02x}{:02x}".format(
+            int(int(h1[0:2],16)*(1-t)+int(h2[0:2],16)*t),
+            int(int(h1[2:4],16)*(1-t)+int(h2[2:4],16)*t),
+            int(int(h1[4:6],16)*(1-t)+int(h2[4:6],16)*t))
+
+# ── main window ───────────────────────────────────────────────────────────────
+class JarvisVoiceUI:
     def __init__(self):
         self.root=tk.Tk()
-        self.root.title("J.A.R.V.I.S — Stark Industries")
-        self.root.configure(bg=BG)
-        self.root.geometry("920x660")
-        self.root.minsize(780,540)
-        try: self.root.attributes("-alpha",0.97)
-        except: pass
+        self.root.title("J.A.R.V.I.S")
+        self.root.configure(bg="#020c18")
+        # start windowed but allow fullscreen with F11
+        self.root.geometry("900x600")
+        self.root.resizable(True,True)
+        try:self.root.attributes("-alpha",.93)
+        except:pass
 
-        self._state   = State.IDLE
-        self._voice   = VoiceEngine()
-        self._ui_q    = queue.Queue()
-        self._running = True
-        self._mentor  = False
-        self._handler = None
-        self._thinking_active = False
-        self._thinking_id     = 0
-        self._session_turns   = 0
+        self._voice=Voice()
+        self._uiq=queue.Queue()
+        self._run=True
+        self._state=State.IDLE
+        self._mentor=False
+        self._handler=None
+        self._wake_event=threading.Event()
 
         self._build()
         self._start_engine()
         self._poll()
-        self.root.protocol("WM_DELETE_WINDOW", self._close)
+
+        self.root.protocol("WM_DELETE_WINDOW",self._close)
+        self.root.bind("<F11>",self._toggle_fullscreen)
+        self.root.bind("<Escape>",lambda e:self.root.attributes("-fullscreen",False))
+        self._fs=False
+
+    def _toggle_fullscreen(self,event=None):
+        self._fs=not self._fs
+        self.root.attributes("-fullscreen",self._fs)
 
     def _build(self):
-        r=self.root
+        self._cv=tk.Canvas(self.root,bg="#020c18",highlightthickness=0)
+        self._cv.pack(fill="both",expand=True)
+        self._cv.bind("<Configure>",self._on_resize)
+        W,H=900,600
+        self._orb=Orb(self._cv,W,H)
 
-        # ── top bar ──
-        top=tk.Frame(r,bg=BG,height=50); top.pack(fill="x"); top.pack_propagate(False)
-        tk.Label(top,text="  J.A.R.V.I.S",bg=BG,fg=ACCENT,font=("Courier",20,"bold")).pack(side="left")
-        tk.Label(top,text="  STARK INDUSTRIES · PERSONAL AI ASSISTANT",bg=BG,fg=TEXT_DIM,font=("Courier",9)).pack(side="left")
-        self._clk=tk.Label(top,text="",bg=BG,fg=TEXT_DIM,font=("Courier",10)); self._clk.pack(side="right",padx=14)
-        self._tick_clock()
-        tk.Frame(r,bg=DIM,height=1).pack(fill="x")
+    def _on_resize(self,event):
+        W,H=event.width,event.height
+        self._orb.w=W;self._orb.h=H
+        self._orb.cx=W//2;self._orb.cy=H//2
 
-        # ── body ──
-        body=tk.Frame(r,bg=BG); body.pack(fill="both",expand=True)
-
-        # LEFT column
-        left=tk.Frame(body,bg=BG,width=290); left.pack(side="left",fill="y"); left.pack_propagate(False)
-
-        # reactor
-        cv_size=230
-        self._cv=tk.Canvas(left,width=cv_size,height=cv_size,bg=BG,highlightthickness=0)
-        self._cv.pack(pady=(18,6))
-        self._reactor=ArcReactor(self._cv,cv_size//2,cv_size//2,84)
-
-        self._stvar=tk.StringVar(value="INITIALISING")
-        tk.Label(left,textvariable=self._stvar,bg=BG,fg=ACCENT,font=("Courier",11,"bold")).pack()
-
-        tk.Frame(left,bg=DIM,height=1).pack(fill="x",padx=14,pady=10)
-
-        # sys info
-        inf=tk.Frame(left,bg=BG2); inf.pack(fill="x",padx=12,pady=2)
-        self._inf={}
-        for k in ["CPU","RAM","BAT","TIME","SESS"]:
-            row=tk.Frame(inf,bg=BG2); row.pack(fill="x",padx=8,pady=2)
-            tk.Label(row,text=f"{k}:",bg=BG2,fg=TEXT_DIM,font=("Courier",9),width=5,anchor="w").pack(side="left")
-            lbl=tk.Label(row,text="—",bg=BG2,fg=TEXT,font=("Courier",9),anchor="w"); lbl.pack(side="left")
-            self._inf[k]=lbl
-        self._inf["SESS"].config(text="0 turns")
-        self._tick_sys()
-
-        tk.Frame(left,bg=DIM,height=1).pack(fill="x",padx=14,pady=10)
-
-        # buttons
-        bc=dict(bg=BG2,fg=ACCENT,font=("Courier",9,"bold"),relief="flat",bd=0,
-                padx=10,pady=7,cursor="hand2",activebackground=DIM,activeforeground=TEXT_BRIGHT)
-        self._mic_btn=tk.Button(left,text="🎤  LISTEN NOW",command=self._manual_listen,**bc)
-        self._mic_btn.pack(fill="x",padx=14,pady=3)
-        self._mtr_btn=tk.Button(left,text="🧠  MENTOR MODE",command=self._toggle_mentor,**bc)
-        self._mtr_btn.pack(fill="x",padx=14,pady=3)
-        tk.Button(left,text="🗑   CLEAR MEMORY",command=self._clear_mem,**bc).pack(fill="x",padx=14,pady=3)
-        tk.Button(left,text="✕   QUIT",command=self._close,**{**bc,"fg":RED}).pack(fill="x",padx=14,pady=(12,3))
-
-        # RIGHT column
-        right=tk.Frame(body,bg=BG); right.pack(side="left",fill="both",expand=True)
-
-        hdr=tk.Frame(right,bg=BG2,height=30); hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr,text="  CONVERSATION LOG",bg=BG2,fg=TEXT_DIM,font=("Courier",9,"bold"),anchor="w").pack(side="left")
-        self._mtr_lbl=tk.Label(hdr,text="",bg=BG2,fg=GOLD,font=("Courier",9,"bold")); self._mtr_lbl.pack(side="right",padx=10)
-
-        tf=tk.Frame(right,bg=BG2,bd=1,relief="flat"); tf.pack(fill="both",expand=True,padx=6,pady=4)
-        self._log=Transcript(tf)
-
-        # input bar
-        inp=tk.Frame(right,bg=BG,height=46); inp.pack(fill="x",pady=(0,6),padx=6); inp.pack_propagate(False)
-        tk.Label(inp,text="›",bg=BG,fg=ACCENT,font=("Courier",15,"bold")).pack(side="left",padx=(8,4))
-        self._ivar=tk.StringVar()
-        entry=tk.Entry(inp,textvariable=self._ivar,bg=BG2,fg=TEXT_BRIGHT,
-                       insertbackground=ACCENT,font=("Courier",11),relief="flat",bd=0)
-        entry.pack(side="left",fill="both",expand=True,ipady=7)
-        entry.bind("<Return>",self._type_submit)
-        tk.Button(inp,text="SEND",command=self._type_submit,bg=ACCENT2,fg=BG,
-                  font=("Courier",9,"bold"),relief="flat",bd=0,padx=14,pady=7,
-                  cursor="hand2").pack(side="right",padx=4)
-
-        tk.Frame(r,bg=DIM,height=1).pack(fill="x")
-        bot=tk.Frame(r,bg=BG,height=24); bot.pack(fill="x"); bot.pack_propagate(False)
-        tk.Label(bot,text='  Say "Hey Jarvis" anytime',bg=BG,fg=TEXT_DIM,font=("Courier",8)).pack(side="left")
-        self._wlbl=tk.Label(bot,text="● WAKE WORD ACTIVE",bg=BG,fg=GREEN,font=("Courier",8,"bold"))
-        self._wlbl.pack(side="right",padx=10)
-
-    # ── clock & sys info ─────────────────────────────────────────────────────
-    def _tick_clock(self):
-        self._clk.config(text=datetime.datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
-        self.root.after(1000,self._tick_clock)
-
-    def _tick_sys(self):
-        try:
-            import psutil
-            cpu=psutil.cpu_percent(interval=None)
-            ram=psutil.virtual_memory()
-            bat=psutil.sensors_battery()
-            self._inf["CPU"].config(text=f"{cpu:.0f}%",fg=RED if cpu>80 else ACCENT)
-            self._inf["RAM"].config(text=f"{ram.percent:.0f}%",fg=RED if ram.percent>85 else TEXT)
-            if bat:
-                ch="⚡" if bat.power_plugged else "🔋"
-                self._inf["BAT"].config(text=f"{ch}{bat.percent:.0f}%",fg=RED if bat.percent<15 else TEXT)
-            else:
-                self._inf["BAT"].config(text="desktop")
-            self._inf["TIME"].config(text=datetime.datetime.now().strftime("%H:%M"))
-        except Exception:
-            pass
-        self.root.after(5000,self._tick_sys)
-
-    # ── state ────────────────────────────────────────────────────────────────
     def _set_state(self,s):
-        self._state=s
-        self._reactor.set_state(s)
-        lbl,col={"IDLE":("STANDBY",TEXT_DIM),"WAKE":("ONLINE",GOLD),
-                  "LISTENING":("LISTENING",GREEN),"THINKING":("PROCESSING",GOLD),
-                  "SPEAKING":("SPEAKING",ACCENT)}.get(s,("—",TEXT_DIM))
-        self.root.after(0,lambda: self._stvar.set(lbl))
+        self._state=s;self._orb.set_state(s)
 
-    # ── engine ───────────────────────────────────────────────────────────────
+    # ── engine ────────────────────────────────────────────────────────────────
     def _start_engine(self):
-        threading.Thread(target=self._engine_thread,daemon=True).start()
+        threading.Thread(target=self._engine,daemon=True).start()
 
-    def _engine_thread(self):
-        self._ui("sys","Initialising Jarvis core...")
-        try:
-            import jarvis as core
-        except Exception as e:
-            self._ui("sys",f"ERROR importing jarvis.py — {e}"); return
+    def _engine(self):
+        print("[Jarvis] Loading core...")
+        try:import jarvis as core
+        except Exception as e:print(f"ERROR: {e}");return
 
-        api_key=os.environ.get("ANTHROPIC_API_KEY","")
-        if not api_key:
-            self._ui("sys","⚠  No ANTHROPIC_API_KEY — AI answers disabled. Run: setx ANTHROPIC_API_KEY \"your-key\"")
+        api=os.environ.get("ANTHROPIC_API_KEY","")
+        if not api:print("⚠  No ANTHROPIC_API_KEY set")
 
         self._core=core
-        mem=core.Memory(); skills=core.SkillsManager(); plugins=core.PluginManager()
-        ai=core.JarvisAI(api_key,mem)
+        mem=core.Memory();skills=core.SkillsManager()
+        plugins=core.PluginManager();ai=core.JarvisAI(api,mem)
 
-        # Store wake event on self — cross-thread access requires it to be on
-        # an object, not a closure variable, to avoid stale reference issues
-        self._wake_event = threading.Event()
-        def on_wake():
-            print("[HUD] Wake word received — triggering conversation cycle")
-            self._wake_event.set()
+        def on_wake():self._wake_event.set()
         wd=core.WakeWordDetector(on_wake,core.CONFIG)
 
-        # Patch speak() so core engine uses our voice + UI
         def _speak(text,wake_det=None):
-            if not text or not text.strip(): return
-            self._ui("JARVIS",text)
+            if not text or not text.strip():return
             ev=threading.Event()
             self._set_state(State.SPEAKING)
             self._voice.speak(text,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
             ev.wait(timeout=60)
-            if wake_det: wake_det.resume()
+            if wake_det:wake_det.resume()
         core.speak=_speak
 
         self._handler=core.CommandHandler(ai,mem,skills,plugins,wd)
-        self._mem_ref=mem
-        self._session_turns=0
+        if self._handler.agents:
+            self._handler.agents.speak_fn=lambda t:(_speak(t),None)[1]
+        self._mem=mem;self._wd=wd
 
-        # Report which voice mode was detected
-        self._ui("sys",f"Voice engine: {self._voice._mode}")
+        vok=core.load_whisper_model()
+        self._listen_fn=core.listen_microphone
+        if vok:wd.start();print("[Jarvis] Wake word active")
+        else:print("[Jarvis] Whisper unavailable")
 
-        voice_ok=core.load_whisper_model()
-        self._core_listen=core.listen_microphone
-
-        if voice_ok:
-            wd.start()
-            self._ui("sys","Whisper ready. Say 'Hey Jarvis' anytime.")
-        else:
-            self._ui("sys","Whisper unavailable — use the text input below.")
-            self.root.after(0,lambda: self._wlbl.config(text="● WAKE WORD INACTIVE",fg=RED))
-
-        # Startup greeting
+        # startup greeting
+        self._set_state(State.SPEAKING);snd_wake()
         greet="Jarvis online. All systems operational. How may I assist you today, sir?"
-        self._ui("JARVIS",greet)
-        self._set_state(State.SPEAKING)
-        sound_wake()
         ev=threading.Event()
         self._voice.speak(greet,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
         ev.wait(timeout=25)
 
-        # Update session counter in UI
-        self._update_session_ui()
-
-        # Main wake-word loop
-        while self._running:
+        # main loop
+        while self._run:
             if self._wake_event.wait(timeout=0.2):
-                self._wake_event.clear()
-                self._wake_cycle(wd)
+                self._wake_event.clear();self._wake_cycle(wd)
 
     def _wake_cycle(self,wd):
-        """Full conversation cycle: wake → greet → listen → respond → keep listening."""
-        self._set_state(State.WAKE); sound_wake()
-
-        greetings=[
-            "Hello sir, I'm Jarvis, your personal assistant at work. How may I help you?",
-            "Yes sir, I'm listening. What can I do for you?",
-            "Jarvis here. Go ahead sir.",
-            "Online and ready. What do you need?",
+        self._set_state(State.WAKE);snd_wake()
+        greets=[
+            "Hello sir, I'm Jarvis, your personal assistant. How may I help you?",
+            "Jarvis here. What can I do for you, sir?",
+            "Online and ready. What's the mission?",
+            "Yes sir. Go ahead.",
         ]
-        # First wake always gets the full intro; subsequent ones are shorter
-        g = greetings[0] if self._session_turns == 0 else random.choice(greetings[1:])
-        self._ui("JARVIS",g)
-        ev=threading.Event()
-        self._set_state(State.SPEAKING)
+        g=greets[0] if not hasattr(self,"_greeted") else random.choice(greets[1:])
+        self._greeted=True
+        ev=threading.Event();self._set_state(State.SPEAKING)
         self._voice.speak(g,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
         ev.wait(timeout=15)
-
-        # First turn
-        should_continue = self._one_turn(wd)
-
-        # Auto-listen: keep the conversation flowing for up to 4 more turns
-        # without needing "Hey Jarvis" again, as long as Jarvis got a response
-        follow_up_count = 0
-        while self._running and should_continue and follow_up_count < 4:
-            # Small pause so it doesn't feel like it's rushing
-            time.sleep(0.4)
-            # Check if mentor mode wants to keep going indefinitely
-            if self._mentor:
-                should_continue = self._one_turn(wd)
-            else:
-                # In normal mode: offer one follow-up, then go idle
-                if follow_up_count == 0:
-                    self._ui("sys","Still listening for follow-up...")
-                should_continue = self._one_turn(wd)
-                follow_up_count += 1
-
-        # Go fully idle — reactor slows down
+        cont=self._turn(wd)
+        follow=0
+        while self._run and cont and (self._mentor or follow<3):
+            time.sleep(0.3);cont=self._turn(wd);follow+=1
         self._set_state(State.IDLE)
 
-    def _one_turn(self,wd=None) -> bool:
-        """
-        Listen → ack → process → speak one full turn.
-        Returns True if a real response was given (so caller can chain turns),
-        False if nothing was heard or user said goodbye.
-        """
-        if not hasattr(self,"_core_listen"): return False
-
-        self._set_state(State.LISTENING); sound_listen()
-        self._ui("sys","Listening...")
-        if wd: wd.pause()
-
-        text=self._core_listen()
-
-        if not text:
-            self._set_state(State.IDLE); sound_error()
-            self._ui("sys","Nothing heard — going idle. Say 'Hey Jarvis' to start again.")
-            if wd: wd.resume()
-            return False
-
-        self._ui("YOU",text)
-        self._session_turns+=1
-        self._update_session_ui()
-
-        # Instant "I got you" acknowledgement before any processing
-        acks=["I got you.","Got it.","On it.","Sure thing.","Right away sir.",
-              "Understood.","Of course.","Leave it to me."]
+    def _turn(self,wd=None):
+        if not hasattr(self,"_listen_fn"):return False
+        self._set_state(State.LISTENING);snd_listen()
+        if wd:wd.pause()
+        txt=self._listen_fn()
+        if not txt:
+            self._set_state(State.IDLE);snd_err()
+            if wd:wd.resume();return False
+        # ack
+        acks=["I got you.","Got it.","On it.","Sure thing.",
+              "Right away, sir.","Understood.","Of course.","Leave it to me."]
         ack=random.choice(acks)
-        ev=threading.Event()
-        self._set_state(State.SPEAKING)
+        ev=threading.Event();self._set_state(State.SPEAKING)
         self._voice.speak(ack,on_done=lambda:(self._set_state(State.THINKING),ev.set()))
         ev.wait(timeout=8)
+        self._set_state(State.THINKING)
+        try:resp=self._handler.handle(txt)
+        except Exception as e:resp=f"I hit an error — {e}"
 
-        # Show thinking dots in transcript
-        self._show_thinking()
-
-        try:
-            resp=self._handler.handle(text)
-        except Exception as e:
-            resp=f"I ran into a snag — {e}"
-
-        # Remove thinking dots
-        self._hide_thinking()
-
-        # Shutdown
         if resp=="SHUTDOWN":
-            byes=["Goodbye sir, take care!","See you later sir. It was a pleasure.",
-                  "Signing off. Stay brilliant, sir.","Goodbye! I'll be here when you need me."]
-            bye=random.choice(byes)
-            self._ui("JARVIS",bye)
-            ev=threading.Event()
-            self._set_state(State.SPEAKING)
-            self._voice.speak(bye,on_done=lambda:ev.set())
-            ev.wait(timeout=12)
-            sound_done()
-            self._running=False
-            self.root.after(800,self.root.destroy)
-            return False
+            byes=["Goodbye sir, take care!","See you later sir.",
+                  "Signing off. Stay brilliant, sir.","Goodbye!"]
+            ev=threading.Event();self._set_state(State.SPEAKING)
+            self._voice.speak(random.choice(byes),on_done=lambda:ev.set())
+            ev.wait(timeout=12);snd_done()
+            self._run=False;self.root.after(800,self.root.destroy);return False
 
         if resp=="AGENTS_ASSEMBLE":
-            msg="Agents standing by, sir. What's the mission?"
-            self._ui("JARVIS",msg)
-            ev=threading.Event()
-            self._set_state(State.SPEAKING)
-            self._voice.speak(msg,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
-            ev.wait(timeout=8)
-            # Listen for the mission
-            self._set_state(State.LISTENING); sound_listen()
-            self._ui("sys","Listening for mission...")
-            mission=self._core_listen() if hasattr(self,"_core_listen") else None
-            if mission and hasattr(self,"_handler") and self._handler and self._handler.agents:
-                self._ui("YOU",mission)
-                def _run_agents():
-                    # Pass UI + speak callbacks into the commander
-                    self._handler.agents.speak_fn=lambda t: (
-                        self._ui("JARVIS",t),
-                        self._voice.speak(t)
-                    )
-                    self._handler.agents.ui=self._ui
-                    briefing=self._handler.agents.assemble(mission)
-                    self._ui("JARVIS",briefing)
-                    ev2=threading.Event()
-                    self._set_state(State.SPEAKING)
-                    self._voice.speak(briefing,
-                        on_done=lambda:(self._set_state(State.IDLE),ev2.set()))
-                    ev2.wait(timeout=60)
-                    sound_done()
-                threading.Thread(target=_run_agents,daemon=True).start()
-            else:
-                self._ui("sys","No mission heard. Say 'Agents assemble' again.")
-                self._set_state(State.IDLE)
-            if wd: wd.resume()
-            return False
+            self._do_agents(wd);return False
 
         if resp:
-            ev=threading.Event()
-            self._set_state(State.SPEAKING)
+            ev=threading.Event();self._set_state(State.SPEAKING)
             self._voice.speak(resp,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
-            ev.wait(timeout=90)
-            sound_done()
-            if wd: wd.resume()
-            return True   # got a real response — caller may chain
+            ev.wait(timeout=90);snd_done()
+            if wd:wd.resume();return True
+        self._set_state(State.IDLE)
+        if wd:wd.resume();return False
+
+    def _do_agents(self,wd=None):
+        msg="Agents standing by, sir. What's the mission?"
+        ev=threading.Event();self._set_state(State.SPEAKING)
+        self._voice.speak(msg,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
+        ev.wait(timeout=10)
+        self._set_state(State.LISTENING);snd_listen()
+        if wd:wd.pause()
+        mission=self._listen_fn() if hasattr(self,"_listen_fn") else None
+        if mission and self._handler and self._handler.agents:
+            def _run():
+                briefing=self._handler.agents.assemble(mission)
+                ev2=threading.Event();self._set_state(State.SPEAKING)
+                self._voice.speak(briefing,on_done=lambda:(self._set_state(State.IDLE),ev2.set()))
+                ev2.wait(timeout=90);snd_done()
+                if wd:wd.resume()
+            threading.Thread(target=_run,daemon=True).start()
         else:
             self._set_state(State.IDLE)
-            if wd: wd.resume()
-            return False
-
-    # ── Thinking indicator ────────────────────────────────────────────────────
-    def _show_thinking(self):
-        """Add animated thinking indicator while processing."""
-        self._thinking_active=True
-        self._thinking_id=id(self)+self._session_turns
-        self._ui("sys","··· thinking")
-        self._animate_thinking(self._thinking_id, 0)
-
-    def _animate_thinking(self, tid, step):
-        if not hasattr(self,"_thinking_active") or not self._thinking_active:
-            return
-        if tid!=self._thinking_id: return
-        dots=["··· thinking","···· thinking ·","····· thinking ··"]
-        # Just pulse the status label — transcript entry already added
-        if self._state==State.THINKING:
-            self._stvar.set(["PROCESSING","PROCESSING ·","PROCESSING ··"][step%3])
-        self.root.after(400, lambda: self._animate_thinking(tid, step+1))
-
-    def _hide_thinking(self):
-        self._thinking_active=False
-
-    # ── Session counter ───────────────────────────────────────────────────────
-    def _update_session_ui(self):
-        turns=getattr(self,"_session_turns",0)
-        label=f"{turns} turn" if turns==1 else f"{turns} turns"
-        self.root.after(0, lambda: self._inf["SESS"].config(text=label))
-
-    # ── Manual listen button ──────────────────────────────────────────────────
-    def _manual_listen(self):
-        if self._state not in (State.IDLE, State.WAKE):
-            return  # don't double-trigger
-        threading.Thread(target=lambda: self._one_turn(None), daemon=True).start()
-
-    def _type_submit(self,event=None):
-        text=self._ivar.get().strip()
-        if not text: return
-        if self._state in (State.LISTENING, State.THINKING):
-            return  # busy — ignore
-        self._ivar.set("")
-        self._ui("YOU",text)
-        self._session_turns+=1
-        self._update_session_ui()
-
-        def _run():
-            self._set_state(State.THINKING)
-            self._thinking_active=True
-            self._show_thinking()
-            try:
-                resp=self._handler.handle(text)
-            except Exception as e:
-                resp=f"Error: {e}"
-            self._hide_thinking()
-
-            if resp and resp!="SHUTDOWN":
-                ev=threading.Event()
-                self._set_state(State.SPEAKING)
-                self._voice.speak(resp,on_done=lambda:(self._set_state(State.IDLE),ev.set()))
-                ev.wait(timeout=90)
-                sound_done()
-            elif resp=="SHUTDOWN":
-                bye=random.choice(["Goodbye sir!","See you later!","Signing off."])
-                self._ui("JARVIS",bye)
-                ev=threading.Event()
-                self._voice.speak(bye,on_done=lambda:ev.set()); ev.wait(timeout=8)
-                self._running=False; self.root.after(600,self.root.destroy)
-            else:
-                self._set_state(State.IDLE)
-        threading.Thread(target=_run,daemon=True).start()
-
-    def _toggle_mentor(self):
-        self._mentor=not self._mentor
-        if self._handler:
-            self._handler.mentor_mode=self._mentor
-            if hasattr(self._handler,"ai"): self._handler.ai.mentor_active=self._mentor
-        if self._mentor:
-            self._mtr_btn.config(fg=GOLD)
-            self._mtr_lbl.config(text="● MENTOR MODE")
-            msg=("Mentor mode on. I'm here as your friend. "
-                 "Talk freely — I'll keep listening turn after turn without you needing to say hey Jarvis.")
-        else:
-            self._mtr_btn.config(fg=ACCENT)
-            self._mtr_lbl.config(text="")
-            msg="Back to standard mode. Say hey Jarvis whenever you need me."
-        self._ui("JARVIS",msg)
-        ev=threading.Event()
-        self._voice.speak(msg,on_done=lambda:ev.set())
-
-    def _clear_mem(self):
-        if hasattr(self,"_mem_ref"): self._mem_ref.clear()
-        self._session_turns=0
-        self._update_session_ui()
-        self._ui("sys","Memory cleared.")
-        self._voice.speak("Memory wiped. Starting fresh, sir.")
-
-    # ── UI queue ─────────────────────────────────────────────────────────────
-    def _ui(self,spk,msg):
-        self._ui_q.put((spk,msg))
+            if wd:wd.resume()
 
     def _poll(self):
-        while not self._ui_q.empty():
-            try:
-                spk,msg=self._ui_q.get_nowait()
-                self._log.add(spk,msg)
-            except queue.Empty:
-                break
         self.root.after(80,self._poll)
 
-    # ── close ─────────────────────────────────────────────────────────────────
     def _close(self):
-        self._running=False
-        try: self._reactor.stop()
-        except: pass
-        if hasattr(self,"_mem_ref"): self._mem_ref.save()
-        try: self.root.destroy()
-        except: pass
+        self._run=False
+        try:self._orb.stop()
+        except:pass
+        if hasattr(self,"_mem"):self._mem.save()
+        try:self.root.destroy()
+        except:pass
 
-    def run(self): self.root.mainloop()
+    def run(self):self.root.mainloop()
 
 def main():
     print("""
-╔══════════════════════════════════════════════════╗
-║   J.A.R.V.I.S  —  Iron Man HUD  Interface       ║
-║   Real-time voice · Deep voice · Arc Reactor    ║
-╚══════════════════════════════════════════════════╝
-    """)
-    JarvisHUD().run()
+╔══════════════════════════════════════════╗
+║  J.A.R.V.I.S  ·  VOICE-ONLY  ·  ORB   ║
+║  F11 = fullscreen  ·  Esc = windowed   ║
+╚══════════════════════════════════════════╝""")
+    JarvisVoiceUI().run()
 
 if __name__=="__main__":
     main()
