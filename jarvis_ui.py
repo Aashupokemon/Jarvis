@@ -1,7 +1,8 @@
 """
-JARVIS — Artistic Voice Orb UI v3
-Full-screen, no buttons, pure voice. Orb reacts with plasma, particles,
-lightning arcs, ripple rings, and full colour transitions per state.
+JARVIS — Solar System UI v4
+Jarvis is the sun at the centre. Each agent is an orbiting planet.
+Planets glow and pulse brighter when their agent is actively working.
+Fully voice controlled — no buttons, no transcript.
 """
 import os,sys,threading,time,queue,math,random,subprocess,platform,datetime
 import tkinter as tk
@@ -69,80 +70,107 @@ class Voice:
             f"try{{$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male)}}catch{{}};"
             f"$s.Rate=-2;$s.Volume=100;$s.Speak('{s}')"],check=False,timeout=60)
 
-# ── colour config ─────────────────────────────────────────────────────────────
-PALETTES={
-    State.IDLE:     dict(c1=(0,51,255),    c2=(0,170,255),   c3=(68,221,255),  acc=(0,102,255)),
-    State.WAKE:     dict(c1=(255,102,0),   c2=(255,170,0),   c3=(255,238,68),  acc=(255,204,0)),
-    State.LISTENING:dict(c1=(0,204,68),    c2=(0,255,136),   c3=(136,255,204), acc=(0,255,102)),
-    State.THINKING: dict(c1=(170,0,255),   c2=(255,0,204),   c3=(255,136,238), acc=(204,68,255)),
-    State.SPEAKING: dict(c1=(0,204,255),   c2=(255,255,255), c3=(136,238,255), acc=(0,255,255)),
-}
-
 def lerp_rgb(a,b,t):
     t=max(0.,min(1.,t))
     return tuple(int(a[i]+(b[i]-a[i])*t) for i in range(3))
+def rgb_hex(r,g,b):
+    return f"#{max(0,min(255,int(r))):02x}{max(0,min(255,int(g))):02x}{max(0,min(255,int(b))):02x}"
+def scale_c(c,f):
+    return tuple(max(0,min(255,int(v*f))) for v in c)
 
-def rgb_hex(r,g,b,a=255):
-    return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+# ── Sun palette per state ──────────────────────────────────────────────────────
+SUN_PALETTES={
+    State.IDLE:     dict(core=(60,140,255),  mid=(20,70,180),  glow=(0,40,120)),
+    State.WAKE:     dict(core=(255,220,80),  mid=(255,160,20), glow=(180,90,0)),
+    State.LISTENING:dict(core=(120,255,170), mid=(20,200,110), glow=(0,120,60)),
+    State.THINKING: dict(core=(230,120,255), mid=(160,40,220), glow=(90,0,140)),
+    State.SPEAKING: dict(core=(255,255,255), mid=(80,220,255), glow=(0,140,200)),
+}
 
-class Orb:
+# ── Planets = the 7 agents ─────────────────────────────────────────────────────
+PLANETS=[
+    dict(name="Research", color=(80,220,190),  r_orbit=110, size=8,  speed=1.4),
+    dict(name="File",     color=(90,160,255),  r_orbit=145, size=9,  speed=1.05),
+    dict(name="System",   color=(255,180,70),  r_orbit=180, size=10, speed=.85),
+    dict(name="Image",    color=(255,120,140), r_orbit=215, size=8,  speed=.68),
+    dict(name="Email",    color=(120,230,120), r_orbit=250, size=9,  speed=.55),
+    dict(name="Web",      color=(210,120,255), r_orbit=285, size=8,  speed=.44),
+    dict(name="Code",     color=(160,140,255), r_orbit=320, size=10, speed=.36),
+]
+
+class SolarSystem:
     def __init__(self,canvas,w,h):
-        self.cv=canvas;self.w=w;self.h=h
-        self.cx=w//2;self.cy=h//2
+        self.cv=canvas;self.w=w;self.h=h;self.cx=w//2;self.cy=h//2
         self.state=State.IDLE;self.t=0.
-        self.cur=dict(PALETTES[State.IDLE]);self.tgt=dict(PALETTES[State.IDLE]);self.blend=1.
-        self.bars=[0.]*48;self.bar_tgt=[0.]*48
-        self.particles=[];self.ripples=[];self.plasma_rings=[]
+        self.cur=dict(SUN_PALETTES[State.IDLE]);self.tgt=dict(self.cur);self.blend=1.
+        self.bars=[0.]*40;self.bar_tgt=[0.]*40
+        self.particles=[];self.ripples=[]
+        # planet runtime state: name -> {'angle':.., 'active':bool, 'pulse':0..1, 'status':'idle'}
+        self.planets={p["name"]:dict(angle=random.random()*360,active=False,
+                                      pulse=0.,status="idle",flash=0.) for p in PLANETS}
+        self.mission_active=False
+        self.stars=[(random.random(),random.random(),random.random()*1.6+.3) for _ in range(140)]
         self._items=[];self._alive=True;self._tick()
 
     def set_state(self,s):
-        old=self.state;self.state=s
-        self.tgt=dict(PALETTES.get(s,PALETTES[State.IDLE]));self.blend=0.
-        if s in (State.WAKE,State.LISTENING,State.SPEAKING,State.THINKING):
-            self._burst(24 if s==State.WAKE else 12)
-            self.ripples.append([self.t,200 if s==State.WAKE else 140])
+        self.state=s;self.tgt=dict(SUN_PALETTES.get(s,SUN_PALETTES[State.IDLE]));self.blend=0.
+        if s in (State.WAKE,State.LISTENING,State.SPEAKING):
+            self._burst(16 if s==State.WAKE else 8)
+            self.ripples.append([self.t,170 if s==State.WAKE else 110])
+
+    def agent_event(self,name,status):
+        """Called from AgentCommander: status in start/done/error, or __mission__ start/end."""
+        if name=="__mission__":
+            self.mission_active=(status=="start")
+            return
+        p=self.planets.get(name)
+        if not p:return
+        if status=="start":
+            p["active"]=True;p["status"]="active";p["flash"]=1.
+        elif status=="done":
+            p["active"]=False;p["status"]="done";p["flash"]=1.
+        elif status=="error":
+            p["active"]=False;p["status"]="error";p["flash"]=1.
 
     def stop(self):self._alive=False
 
     def _burst(self,n):
         for _ in range(n):
-            a=random.random()*math.pi*2;sp=3+random.random()*6
-            self.particles.append([self.cx,self.cy,math.cos(a)*sp,math.sin(a)*sp,1.,2+random.random()*5])
+            a=random.random()*math.pi*2;sp=2+random.random()*5
+            self.particles.append([self.cx,self.cy,math.cos(a)*sp,math.sin(a)*sp,1.,2+random.random()*4])
 
-    # ── lerp palette ─────────────────────────────────────────────────────────
     def _update_palette(self):
         if self.blend<1.:
             self.blend=min(1.,self.blend+.035)
             e=1-(1-self.blend)**2
-            for k in ("c1","c2","c3","acc"):
+            for k in ("core","mid","glow"):
                 self.cur[k]=lerp_rgb(self.cur[k],self.tgt[k],e)
 
-    # ── update bars ───────────────────────────────────────────────────────────
     def _update_bars(self):
-        mag={"IDLE":.07,"WAKE":.92,"LISTENING":.78,"THINKING":.88,"SPEAKING":.92}.get(self.state,.07)
-        spd={"IDLE":.015,"WAKE":.18,"LISTENING":.14,"THINKING":.20,"SPEAKING":.16}.get(self.state,.015)
-        for i in range(48):
-            self.bar_tgt[i]=max(0,min(1,mag*(0.35+0.65*math.sin(self.t*3+i*.36+random.random()*.5))))
+        mag={"IDLE":.06,"WAKE":.85,"LISTENING":.7,"THINKING":.75,"SPEAKING":.9}.get(self.state,.06)
+        spd={"IDLE":.02,"WAKE":.18,"LISTENING":.14,"THINKING":.16,"SPEAKING":.17}.get(self.state,.02)
+        for i in range(40):
+            self.bar_tgt[i]=max(0,min(1,mag*(.35+.65*math.sin(self.t*3+i*.4+random.random()*.4))))
             self.bars[i]+=(self.bar_tgt[i]-self.bars[i])*spd
             self.bars[i]=max(0,min(1,self.bars[i]))
 
-    # ── main tick ─────────────────────────────────────────────────────────────
     def _tick(self):
         if not self._alive:return
-        self.t+=.022
+        self.t+=.02
         self._update_palette();self._update_bars()
-        if self.state==State.SPEAKING and random.random()<.07:
-            self.plasma_rings.append([self.t,1.])
+        # orbit planets — speed up while active (agent working)
+        for name,p in self.planets.items():
+            base_speed=next(pl["speed"] for pl in PLANETS if pl["name"]==name)
+            mult=2.4 if p["active"] else 1.0
+            p["angle"]=(p["angle"]+base_speed*mult*.6)%360
+            if p["flash"]>0:p["flash"]=max(0,p["flash"]-.015)
         self._draw()
         self.cv.after(28,self._tick)
 
-    # ── draw ─────────────────────────────────────────────────────────────────
     def _draw(self):
         cv=self.cv;W=self.w;H=self.h;cx=self.cx;cy=self.cy;t=self.t
-        sc=min(W,H)/700
-        R=int(96*sc)
-        c1,c2,c3,acc=self.cur["c1"],self.cur["c2"],self.cur["c3"],self.cur["acc"]
-        acc_h=rgb_hex(*acc);c2_h=rgb_hex(*c2);c3_h=rgb_hex(*c3)
+        sc=min(W,H)/760
+        core,mid,glow=self.cur["core"],self.cur["mid"],self.cur["glow"]
 
         for i in self._items:
             try:cv.delete(i)
@@ -151,203 +179,184 @@ class Orb:
         def O(x0,y0,x1,y1,**k):self._items.append(cv.create_oval(x0,y0,x1,y1,**k))
         def L(x0,y0,x1,y1,**k):self._items.append(cv.create_line(x0,y0,x1,y1,**k))
         def T(x,y,**k):self._items.append(cv.create_text(x,y,**k))
-        def A(x0,y0,x1,y1,**k):self._items.append(cv.create_arc(x0,y0,x1,y1,**k))
 
-        pulse=math.sin(t*{"IDLE":1.,"WAKE":5.,"LISTENING":2.5,"THINKING":3.5,"SPEAKING":3.}[self.state])*.5+.5
+        pulse=math.sin(t*{"IDLE":1.,"WAKE":5.,"LISTENING":2.5,"THINKING":3.,"SPEAKING":2.8}[self.state])*.5+.5
 
-        # ── background ────────────────────────────────────────────────────────
-        self._items.append(cv.create_rectangle(0,0,W,H,fill="#00000a",outline=""))
-
-        # ambient nebula circles
-        for i in range(3):
-            nr=int((180+i*55)*sc)
-            nx=cx+int(math.cos(t*.25+i*2.1)*70*sc)
-            ny=cy+int(math.sin(t*.3+i*1.8)*45*sc)
-            alpha=int(20+pulse*12)
-            nc=rgb_hex(int(c1[0]*alpha/255),int(c1[1]*alpha/255),int(c1[2]*alpha/255))
-            O(nx-nr,ny-nr,nx+nr,ny+nr,fill=nc,outline="")
-
-        # grid lines
-        gc=rgb_hex(int(c1[0]*.1),int(c1[1]*.1),int(c1[2]*.1))
-        for gx in range(0,W,int(80*sc)):L(gx,0,gx,H,fill=gc,width=1)
-        for gy in range(0,H,int(80*sc)):L(0,gy,W,gy,fill=gc,width=1)
+        # ── space background ─────────────────────────────────────────────────
+        self._items.append(cv.create_rectangle(0,0,W,H,fill="#00000c",outline=""))
+        for sx,sy,sb in self.stars:
+            x=sx*W;y=sy*H
+            tw=.5+.5*math.sin(t*sb*2+sx*40)
+            r=max(1,int(1.4*sc*tw))
+            b=int(120+tw*135)
+            O(x-r,y-r,x+r,y+r,fill=rgb_hex(b,b,b+15),outline="")
 
         # corner brackets
-        bs=int(38*sc)
-        bc=rgb_hex(int(acc[0]*.55),int(acc[1]*.55),int(acc[2]*.55))
+        bs=int(36*sc)
+        bc=rgb_hex(*scale_c(core,.5))
         for bx,by,dx,dy in [(18,18,1,1),(W-18,18,-1,1),(18,H-18,1,-1),(W-18,H-18,-1,-1)]:
-            L(bx+dx*bs,by,bx,by,fill=bc,width=int(1.5*sc)+1)
-            L(bx,by,bx,by+dy*bs,fill=bc,width=int(1.5*sc)+1)
+            L(bx+dx*bs,by,bx,by,fill=bc,width=max(1,int(1.5*sc)))
+            L(bx,by,bx,by+dy*bs,fill=bc,width=max(1,int(1.5*sc)))
 
-        # ── hex ring ──────────────────────────────────────────────────────────
-        hR=int((R+68)*sc)
-        hspd={"IDLE":.003,"WAKE":.03,"LISTENING":.02,"THINKING":.04,"SPEAKING":.025}[self.state]
-        hbase=t*hspd
-        for i in range(6):
-            a1=hbase+i*math.pi/3;a2=hbase+(i+1)*math.pi/3
-            x1=cx+int(math.cos(a1)*hR);y1=cy+int(math.sin(a1)*hR)
-            x2=cx+int(math.cos(a2)*hR);y2=cy+int(math.sin(a2)*hR)
-            ha=int((0.18+pulse*.3)*255)
-            hc=rgb_hex(int(acc[0]*ha/255),int(acc[1]*ha/255),int(acc[2]*ha/255))
-            L(x1,y1,x2,y2,fill=hc,width=max(1,int(1.5*sc)))
-            mx=(x1+x2)//2;my=(y1+y2)//2
-            dr=max(2,int(3*sc))
-            O(mx-dr,my-dr,mx+dr,my+dr,fill=acc_h,outline="")
+        # ── orbit rings ───────────────────────────────────────────────────────
+        for pl in PLANETS:
+            r=int(pl["r_orbit"]*sc)
+            p=self.planets[pl["name"]]
+            ring_alpha=.35 if p["active"] else .14
+            rc=rgb_hex(*scale_c(core,ring_alpha))
+            O(cx-r,cy-r,cx+r,cy+r,outline=rc,width=1,fill="")
 
-        # ── energy bars ───────────────────────────────────────────────────────
-        nb=48;brI=int((R+9)*sc)
-        for i in range(nb):
-            h=self.bars[i]
-            if h<.03:continue
-            a=i*(2*math.pi/nb)-math.pi/2
-            bl=int((5+h*62)*sc)
-            x1=cx+int(math.cos(a)*brI);y1=cy+int(math.sin(a)*brI)
-            x2=cx+int(math.cos(a)*(brI+bl));y2=cy+int(math.sin(a)*(brI+bl))
-            bc2=lerp_rgb(c2,c3,h)
-            ba=int((0.35+h*.65)*255)
-            bcc=rgb_hex(int(bc2[0]*ba/255),int(bc2[1]*ba/255),int(bc2[2]*ba/255))
-            lw=max(1,int((1+h*3.5)*sc))
-            L(x1,y1,x2,y2,fill=bcc,width=lw)
-            if h>.72:
-                dr=max(2,int(3*sc))
-                O(x2-dr,y2-dr,x2+dr,y2+dr,fill=c3_h,outline="")
+        # ── sun glow layers ──────────────────────────────────────────────────
+        sunR=int((40+pulse*8)*sc)
+        for i,fr in enumerate([3.2,2.4,1.8,1.35]):
+            gr=int(sunR*fr)
+            ga=(0.05+pulse*.06*(4-i))*(1.4 if self.state==State.SPEAKING else 1.)
+            gc=rgb_hex(*scale_c(glow,ga*2.2))
+            O(cx-gr,cy-gr,cx+gr,cy+gr,fill=gc,outline="")
 
-        # inner dash ring
-        for i in range(24):
-            a=-t*.012+i*math.pi/12
-            ri=int((R+3)*sc);ro=ri+int(7*sc)
-            x1=cx+int(math.cos(a)*ri);y1=cy+int(math.sin(a)*ri)
-            x2=cx+int(math.cos(a)*ro);y2=cy+int(math.sin(a)*ro)
-            dc=acc_h if i%3==0 else rgb_hex(int(c1[0]*.4),int(c1[1]*.4),int(c1[2]*.4))
-            L(x1,y1,x2,y2,fill=dc,width=max(1,2 if i%3==0 else 1))
+        # sun corona rays (speaking / wake)
+        if self.state in (State.SPEAKING,State.WAKE):
+            nrays=16
+            for i in range(nrays):
+                a=math.radians(i*(360/nrays)+t*20)
+                h=self.bars[i%len(self.bars)]
+                rlen=int((sunR*1.15+h*50*sc))
+                x1=cx+math.cos(a)*sunR*.9;y1=cy+math.sin(a)*sunR*.9
+                x2=cx+math.cos(a)*rlen;y2=cy+math.sin(a)*rlen
+                rc2=rgb_hex(*scale_c(mid,.4+h*.6))
+                L(x1,y1,x2,y2,fill=rc2,width=max(1,int((1+h*2)*sc)))
 
-        # ── THINKING: orbiting blobs ───────────────────────────────────────────
+        # thinking: swirling energy around sun
         if self.state==State.THINKING:
-            for i in range(6):
-                a=t*1.85+i*math.pi/3
-                orr=int((R*.55+14*sc*math.sin(t*2.5+i))*1)
-                px=cx+int(math.cos(a)*orr);py=cy+int(math.sin(a)*orr)
-                br=int(13*sc)
-                fa=int((0.5+.5*math.sin(t+i))*255)
-                fc=rgb_hex(int(c3[0]*fa/255),int(c3[1]*fa/255),int(c3[2]*fa/255))
+            for i in range(10):
+                a=t*2.2+i*(2*math.pi/10)
+                orr=sunR*1.6+8*sc*math.sin(t*3+i)
+                px=cx+math.cos(a)*orr;py=cy+math.sin(a)*orr
+                br=max(2,int(5*sc))
+                fc=rgb_hex(*scale_c(mid,.6+.4*math.sin(t*2+i)))
                 O(px-br,py-br,px+br,py+br,fill=fc,outline="")
 
-        # ── WAKE: lightning arcs ───────────────────────────────────────────────
+        # wake lightning
         if self.state==State.WAKE:
-            for i in range(8):
-                a=t*2.2+i*math.pi/4
+            for i in range(6):
+                a=t*2+i*math.pi/3
                 pts=[]
-                steps=5
-                for s in range(steps+1):
-                    fr=s/steps
-                    rr=(R*.4+fr*R*1.15)*sc
-                    ja=a+(random.random()-.5)*.35
-                    jit=int(18*sc*(1-fr)*random.random())
-                    pts.extend([cx+int(math.cos(ja)*(rr+jit)),
-                                 cy+int(math.sin(ja)*(rr+jit))])
-                la=int((0.3+random.random()*.55)*255)
-                lc=rgb_hex(int(acc[0]*la/255),int(acc[1]*la/255),int(acc[2]*la/255))
-                if len(pts)>=4:
-                    L(*pts,fill=lc,width=max(1,int((1+random.random()*2)*sc)),smooth=False)
+                for s in range(5):
+                    fr=s/4;rr=(sunR*.8+fr*sunR*1.6)
+                    ja=a+(random.random()-.5)*.3
+                    jit=int(14*sc*(1-fr)*random.random())
+                    pts.extend([cx+math.cos(ja)*(rr+jit),cy+math.sin(ja)*(rr+jit)])
+                lc=rgb_hex(*scale_c(core,.3+random.random()*.5))
+                if len(pts)>=4:L(*pts,fill=lc,width=max(1,int(1.5*sc)))
 
-        # ── ripples ────────────────────────────────────────────────────────────
-        dead=[]
-        for rp in self.ripples:
-            birth,maxR=rp;age=t-birth;life=2.2
-            if age>=life:dead.append(rp);continue
-            fr=age/life;rr=int(maxR*sc*fr)
-            ra=int((1-fr)*.6*255)
-            rc=rgb_hex(int(acc[0]*ra/255),int(acc[1]*ra/255),int(acc[2]*ra/255))
-            if rr>1:O(cx-rr,cy-rr,cx+rr,cy+rr,outline=rc,width=max(1,int((1-fr)*3.5*sc)+1),fill="")
-        for d in dead:self.ripples.remove(d)
-
-        # ── SPEAKING: outward plasma rings ────────────────────────────────────
-        dead2=[]
-        for pr in self.plasma_rings:
-            birth,life=pr;age=t-birth
-            if age>=life:dead2.append(pr);continue
-            fr=age/life
-            rr=int((R+fr*180)*sc)
-            pa=int((1-fr)*.6*255)
-            pc=rgb_hex(int(acc[0]*pa/255),int(acc[1]*pa/255),int(acc[2]*pa/255))
-            lw=max(1,int((1-fr)*2.5*sc)+1)
-            if rr>0:O(cx-rr,cy-rr,cx+rr,cy+rr,outline=pc,width=lw,fill="")
-        for d in dead2:self.plasma_rings.remove(d)
-
-        # ── outer glow layers ─────────────────────────────────────────────────
-        for i,fr in enumerate([2.2,1.7,1.3]):
-            gr=int(R*fr)
-            ga=int((0.07+pulse*.1*(3-i))*255)
-            gc2=rgb_hex(int(c2[0]*ga/255),int(c2[1]*ga/255),int(c2[2]*ga/255))
-            O(cx-gr,cy-gr,cx+gr,cy+gr,fill=gc2,outline="")
-
-        # ── orb body layers ───────────────────────────────────────────────────
-        # outer body
-        O(cx-R,cy-R,cx+R,cy+R,fill=rgb_hex(*c1),outline="")
-        # mid layer
-        m2=int(R*.82);mc=lerp_rgb(c1,c2,.55)
+        # ── sun body ──────────────────────────────────────────────────────────
+        O(cx-sunR,cy-sunR,cx+sunR,cy+sunR,fill=rgb_hex(*mid),outline="")
+        m2=int(sunR*.7);mc=lerp_rgb(mid,core,.6)
         O(cx-m2,cy-m2,cx+m2,cy+m2,fill=rgb_hex(*mc),outline="")
-        # bright inner
-        m3=int(R*.58);mc2=lerp_rgb(c2,c3,.6)
-        O(cx-m3,cy-m3,cx+m3,cy+m3,fill=rgb_hex(*mc2),outline="")
-        # core
-        m4=int(R*.34);mc3=lerp_rgb(c3,(255,255,255),.4)
-        O(cx-m4,cy-m4,cx+m4,cy+m4,fill=rgb_hex(*mc3),outline="")
-
-        # pulsing hot spot
-        pspd={"IDLE":1.2,"WAKE":6.,"LISTENING":3.,"THINKING":4.,"SPEAKING":3.5}[self.state]
-        hp=math.sin(t*pspd)*.5+.5
-        hs=int((R*.13+hp*R*.06))
-        O(cx-hs,cy-hs,cx+hs,cy+hs,fill="#ffffff",outline="")
-
-        # specular highlight
-        sx=cx-int(R*.3);sy=cy-int(R*.35);sr=int(R*.35)
-        sa=int(0.35*255);sc2=rgb_hex(int(lerp_rgb(c3,(255,255,255),.6)[0]*sa/255),
-                                      int(lerp_rgb(c3,(255,255,255),.6)[1]*sa/255),
-                                      int(lerp_rgb(c3,(255,255,255),.6)[2]*sa/255))
+        m3=int(sunR*.4)
+        O(cx-m3,cy-m3,cx+m3,cy+m3,fill=rgb_hex(*core),outline="")
+        hp=math.sin(t*4)*.5+.5
+        m4=int(sunR*(.16+hp*.06))
+        O(cx-m4,cy-m4,cx+m4,cy+m4,fill="#ffffff",outline="")
+        # specular
+        sx=cx-int(sunR*.3);sy=cy-int(sunR*.32);sr=int(sunR*.28)
+        sc2=rgb_hex(*scale_c(lerp_rgb(core,(255,255,255),.6),.4))
         O(sx-sr,sy-sr,sx+sr,sy+sr,fill=sc2,outline="")
 
-        # rim shadow
-        rim=int(R*.85)
-        O(cx-R,cy-R,cx+R,cy+R,outline=rgb_hex(0,0,10),width=int(R*.2)+1,fill="")
+        # ripples from sun
+        dead=[]
+        for rp in self.ripples:
+            birth,maxr=rp;age=t-birth;life=1.8
+            if age>=life:dead.append(rp);continue
+            fr=age/life;r=int(maxr*sc*fr)
+            ra=(1-fr)*.55
+            rc3=rgb_hex(*scale_c(core,ra))
+            if r>1:O(cx-r,cy-r,cx+r,cy+r,outline=rc3,width=max(1,int((1-fr)*3*sc)),fill="")
+        for d in dead:self.ripples.remove(d)
 
-        # ── particles ─────────────────────────────────────────────────────────
-        dead3=[]
+        # particles
+        dead2=[]
         for p in self.particles:
-            p[0]+=p[2];p[1]+=p[3];p[2]*=.95;p[3]*=.95;p[4]-=.022
-            if p[4]<=0:dead3.append(p);continue
-            pr2=max(1,int(p[5]*p[4]*sc))
-            pa=int(p[4]*200)
-            pc2=rgb_hex(int(c3[0]*pa/255),int(c3[1]*pa/255),int(c3[2]*pa/255))
-            O(int(p[0])-pr2,int(p[1])-pr2,int(p[0])+pr2,int(p[1])+pr2,fill=pc2,outline="")
-        for d in dead3:self.particles.remove(d)
+            p[0]+=p[2];p[1]+=p[3];p[2]*=.95;p[3]*=.95;p[4]-=.02
+            if p[4]<=0:dead2.append(p);continue
+            r=max(1,int(p[5]*p[4]*sc))
+            pc=rgb_hex(*scale_c(core,p[4]))
+            O(p[0]-r,p[1]-r,p[0]+r,p[1]+r,fill=pc,outline="")
+        for d in dead2:self.particles.remove(d)
 
-        # ── state label + clock ───────────────────────────────────────────────
+        # ── planets ──────────────────────────────────────────────────────────
+        for pl in PLANETS:
+            name=pl["name"];pc=pl["color"]
+            p=self.planets[name]
+            a=math.radians(p["angle"])
+            r_orbit=int(pl["r_orbit"]*sc)
+            px=cx+math.cos(a)*r_orbit;py=cy+math.sin(a)*r_orbit
+            psize=int(pl["size"]*sc)
+
+            active=p["active"];flash=p["flash"]
+            status=p["status"]
+
+            # active connector line to sun
+            if active:
+                lc=rgb_hex(*scale_c(pc,.5+.3*math.sin(t*6)))
+                L(cx,cy,px,py,fill=lc,width=max(1,int(1.5*sc)))
+
+            # glow ring for active/flash
+            glow_amt=max(.15 if active else 0, flash*.5)
+            if glow_amt>0:
+                gr=int(psize*(2.2+flash))
+                gcol=(255,80,80) if status=="error" else pc
+                gc2=rgb_hex(*scale_c(gcol,glow_amt))
+                O(px-gr,py-gr,px+gr,py+gr,fill=gc2,outline="")
+
+            # planet body
+            body_c=pc
+            if status=="error":body_c=lerp_rgb(pc,(255,60,60),.6)
+            elif active:body_c=lerp_rgb(pc,(255,255,255),.25+.15*math.sin(t*8))
+            psz2=int(psize*(1.3 if active else 1.0))
+            O(px-psz2,py-psz2,px+psz2,py+psz2,fill=rgb_hex(*body_c),outline=rgb_hex(*scale_c(pc,1.3)),width=1)
+
+            # tiny highlight
+            hs=max(1,int(psz2*.35))
+            O(px-hs-psz2*.25,py-hs-psz2*.3,px+hs-psz2*.25,py+hs-psz2*.3,
+              fill=rgb_hex(*scale_c((255,255,255),.5)),outline="")
+
+            # label (only show when active, to reduce clutter)
+            if active or flash>.3:
+                fcol=rgb_hex(*scale_c(pc,.9))
+                T(px,py-psz2-int(10*sc),text=name,fill=fcol,
+                  font=("Courier New",max(7,int(8*sc)),"bold"),anchor="center")
+
+        # ── mission banner ───────────────────────────────────────────────────
+        if self.mission_active:
+            bt=(math.sin(t*3)*.5+.5)
+            bc2=rgb_hex(*scale_c((255,200,60),.6+bt*.4))
+            T(cx,int(46*sc),text="◆ AGENTS ASSEMBLED — MISSION ACTIVE ◆",
+              fill=bc2,font=("Courier New",max(9,int(11*sc)),"bold"),anchor="center")
+
+        # ── HUD text ─────────────────────────────────────────────────────────
         lbl={"IDLE":"STANDBY","WAKE":"ONLINE","LISTENING":"LISTENING",
              "THINKING":"PROCESSING","SPEAKING":"SPEAKING"}[self.state]
-        T(cx,H-int(30*sc),text=f"◉  {lbl}",
-          fill=acc_h,font=("Courier New",max(10,int(13*sc)),"bold"),anchor="center")
+        T(cx,H-int(30*sc),text=f"◉  JARVIS — {lbl}",
+          fill=rgb_hex(*core),font=("Courier New",max(10,int(13*sc)),"bold"),anchor="center")
         T(cx,H-int(14*sc),
-          text='Say "Hey Jarvis" to activate  ·  "Goodbye" to quit  ·  F11 fullscreen',
-          fill=rgb_hex(int(c1[0]*.55),int(c1[1]*.55),int(c1[2]*.55)),
-          font=("Courier New",max(7,int(9*sc))),anchor="center")
+          text='Say "Hey Jarvis" to wake · "Agents assemble" for a mission · "Goodbye" to quit',
+          fill=rgb_hex(*scale_c(mid,.7)),font=("Courier New",max(7,int(9*sc))),anchor="center")
+
         now=datetime.datetime.now()
         T(W-int(16*sc),int(14*sc),text=now.strftime("%H:%M:%S"),
-          fill=rgb_hex(int(acc[0]*.8),int(acc[1]*.8),int(acc[2]*.8)),
-          font=("Courier New",max(8,int(11*sc)),"bold"),anchor="ne")
+          fill=rgb_hex(*scale_c(core,.85)),font=("Courier New",max(8,int(11*sc)),"bold"),anchor="ne")
         T(W-int(16*sc),int(28*sc),text=now.strftime("%Y-%m-%d"),
-          fill=rgb_hex(int(c1[0]*.45),int(c1[1]*.45),int(c1[2]*.45)),
-          font=("Courier New",max(7,int(9*sc))),anchor="ne")
+          fill=rgb_hex(*scale_c(mid,.5)),font=("Courier New",max(7,int(9*sc))),anchor="ne")
 
-class JarvisVoiceUI:
+class JarvisSolarUI:
     def __init__(self):
-        self.root=tk.Tk();self.root.title("J.A.R.V.I.S")
-        self.root.configure(bg="#00000a");self.root.geometry("960x620")
+        self.root=tk.Tk();self.root.title("J.A.R.V.I.S — Solar System")
+        self.root.configure(bg="#00000c");self.root.geometry("1000x680")
         self.root.resizable(True,True)
         try:self.root.attributes("-alpha",.95)
         except:pass
-        self._voice=Voice();self._uiq=queue.Queue()
-        self._run=True;self._state=State.IDLE
+        self._voice=Voice();self._run=True;self._state=State.IDLE
         self._mentor=False;self._handler=None
         self._wake_event=threading.Event();self._fs=False
         self._build();self._start_engine()
@@ -359,17 +368,17 @@ class JarvisVoiceUI:
         self._fs=not self._fs;self.root.attributes("-fullscreen",self._fs)
 
     def _build(self):
-        self._cv=tk.Canvas(self.root,bg="#00000a",highlightthickness=0)
+        self._cv=tk.Canvas(self.root,bg="#00000c",highlightthickness=0)
         self._cv.pack(fill="both",expand=True)
         self._cv.bind("<Configure>",self._on_resize)
-        self._orb=Orb(self._cv,960,620)
+        self._sys=SolarSystem(self._cv,1000,680)
 
     def _on_resize(self,event):
-        self._orb.w=event.width;self._orb.h=event.height
-        self._orb.cx=event.width//2;self._orb.cy=event.height//2
+        self._sys.w=event.width;self._sys.h=event.height
+        self._sys.cx=event.width//2;self._sys.cy=event.height//2
 
     def _set_state(self,s):
-        self._state=s;self._orb.set_state(s)
+        self._state=s;self._sys.set_state(s)
 
     def _start_engine(self):
         threading.Thread(target=self._engine,daemon=True).start()
@@ -395,6 +404,7 @@ class JarvisVoiceUI:
         self._handler=core.CommandHandler(ai,mem,skills,plugins,wd)
         if self._handler.agents:
             self._handler.agents.speak_fn=lambda t:(_speak(t),None)[1]
+            self._handler.agents.agent_event=self._sys.agent_event
         self._mem=mem;self._wd=wd
         vok=core.load_whisper_model();self._listen_fn=core.listen_microphone
         if vok:wd.start();print("[Jarvis] Wake word active")
@@ -476,7 +486,7 @@ class JarvisVoiceUI:
 
     def _close(self):
         self._run=False
-        try:self._orb.stop()
+        try:self._sys.stop()
         except:pass
         if hasattr(self,"_mem"):self._mem.save()
         try:self.root.destroy()
@@ -487,10 +497,11 @@ class JarvisVoiceUI:
 def main():
     print("""
 ╔═══════════════════════════════════════════════╗
-║  J.A.R.V.I.S  ·  ARTISTIC VOICE ORB  v3     ║
-║  F11 = fullscreen  ·  Esc = windowed         ║
+║  J.A.R.V.I.S  ·  SOLAR SYSTEM  ·  v4        ║
+║  Jarvis = Sun  ·  Agents = Planets          ║
+║  F11 = fullscreen  ·  Esc = windowed        ║
 ╚═══════════════════════════════════════════════╝""")
-    JarvisVoiceUI().run()
+    JarvisSolarUI().run()
 
 if __name__=="__main__":
     main()

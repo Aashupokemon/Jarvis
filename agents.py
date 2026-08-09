@@ -785,11 +785,12 @@ class AgentCommander:
         "activate agents", "send in the agents",
     ]
 
-    def __init__(self, api_key: str, handler=None, speak_fn=None, ui_fn=None):
+    def __init__(self, api_key: str, handler=None, speak_fn=None, ui_fn=None, agent_event_fn=None):
         self.api_key  = api_key
         self.handler  = handler    # CommandHandler reference
         self.speak    = speak_fn   # speak(text) callback
         self.ui       = ui_fn      # ui(speaker, text) callback for HUD
+        self.agent_event = agent_event_fn  # agent_event(name, "start"|"done"|"error") callback
 
         # Initialise all agents
         kw = {"api_key": api_key, "handler": handler}
@@ -816,6 +817,7 @@ class AgentCommander:
         Returns the final spoken briefing string.
         """
         _log("Commander", f"Task received: {task}")
+        self._agent_event("__mission__", "start")
         self._say(f"Agents assembling. Parsing your task now.")
         self._ui("JARVIS", f"Agents assembling — task: {task}")
 
@@ -840,6 +842,7 @@ class AgentCommander:
                 if agent:
                     future = pool.submit(agent.run, sub_task)
                     futures[future] = agent_name
+                    self._agent_event(agent_name, "start")
                 else:
                     _log("Commander", f"Unknown agent: {agent_name}")
 
@@ -851,14 +854,17 @@ class AgentCommander:
                     status_icon = "✅" if result["status"] == "ok" else "⚠️"
                     _log(agent_name, f"{status_icon} {result['status']}: {result['result'][:80]}")
                     self._ui("sys", f"{agent_name}: {result['result'][:60]}")
+                    self._agent_event(agent_name, "done" if result["status"] == "ok" else "error")
                 except TimeoutError:
                     results.append({"agent": agent_name, "status": "error",
                                     "result": "timed out", "data": None})
                     _log(agent_name, "❌ Timed out")
+                    self._agent_event(agent_name, "error")
                 except Exception as e:
                     results.append({"agent": agent_name, "status": "error",
                                     "result": str(e), "data": None})
                     _log(agent_name, f"❌ Error: {e}")
+                    self._agent_event(agent_name, "error")
 
         elapsed = time.time() - start_time
         _log("Commander", f"All agents done in {elapsed:.1f}s")
@@ -869,6 +875,7 @@ class AgentCommander:
 
         # 5. Log to file
         self._save_log(task, assignments, results, briefing)
+        self._agent_event("__mission__", "end")
 
         return briefing
 
@@ -881,6 +888,13 @@ class AgentCommander:
     def _ui(self, speaker: str, text: str):
         if self.ui:
             self.ui(speaker, text)
+
+    def _agent_event(self, agent_name: str, status: str):
+        if self.agent_event:
+            try:
+                self.agent_event(agent_name, status)
+            except Exception:
+                pass
 
     def _save_log(self, task, assignments, results, briefing):
         try:
